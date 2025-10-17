@@ -1,0 +1,69 @@
+<!-- Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.            -->
+<!-- SPDX-License-Identifier: BSD-3-Clause-Clear                                   -->
+<?xml version="1.0" encoding="ISO-8859-1"?>
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+
+<!-- %%%%%%%%%%%%%%%%%%%% Type Definitions %%%%%%%%%%%%%%%%%%%% -->
+<xs:complexType name="soNameGroup">
+    <xs:sequence>
+        <xs:element name="so-name" type="xs:string"/>
+    </xs:sequence>
+</xs:complexType>
+
+<xs:complexType name="propsGroup">
+    <xs:sequence>
+        <xs:element name="playback" type="xs:boolean"/>
+        <xs:element name="capture" type="xs:boolean"/>
+        <xs:element name="session_mode" type="xs:boolean"/>
+        <xs:element name="session_mode" type="xs:integer"/>
+    </xs:sequence>
+</xs:complexType>
+
+
+<xs:complexType name="pcmDeviceGroup">
+    <xs:sequence>
+        <xs:element name="id" type="xs:integer"/>
+        <xs:element name="name" type="xs:string"/>
+        <xs:element name="pcm_plugin" type="soNameGroup"/>
+        <xs:element name="props" type="propsGroup"/>
+    </xs:sequence>
+</xs:complexType>
+
+<xs:complexType name="compDeviceGroup">
+    <xs:sequence>
+        <xs:element name="id" type="xs:integer"/>
+        <xs:element name="name" type="xs:string"/>
+        <xs:element name="compress_plugin" type="soNameGroup"/>
+        <xs:element name="props" type="propsGroup"/>
+    </xs:sequence>
+</xs:complexType>
+
+<xs:complexType name="mixerGroup">
+    <xs:sequence>
+        <xs:element name="id" type="xs:integer"/>
+        <xs:element name="name" type="xs:string"/>
+        <xs:element name="mixer_plugin" type="soNameGroup"/>
+    </xs:sequence>
+</xs:complexType>
+
+<!-- %%%%%%%%%%%%%%%%%%%% Structure Definition %%%%%%%%%%%%%%%%%%%% -->
+<xs:element name="defs">
+    <xs:complexType>
+        <xs:sequence>
+            <xs:element name="card">
+                <xs:complexType>
+                    <xs:sequence>
+                        <xs:element name="id" type="xs:integer"/>
+                        <xs:element name="name" type="xs:string"/>
+                        <xs:choice minOccurs="0" maxOccurs="unbounded">
+                            <xs:element name="pcm-device" type="pcmDeviceGroup"/>
+                            <xs:element name="compress-device" type="compDeviceGroup"/>
+                            <xs:element name="mixer" type="mixerGroup"/>
+                        </xs:choice>
+                    </xs:sequence>
+                </xs:complexType>
+            </xs:element>
+        </xs:sequence>
+    </xs:complexType>
+</xs:element>
+</xs:schema>

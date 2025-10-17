@@ -1,0 +1,103 @@
+<!-- Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.            -->
+<!-- SPDX-License-Identifier: BSD-3-Clause-Clear                                   -->
+
+<?xml version="1.0" encoding="ISO-8859-1"?>
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+
+<!-- %%%%%%%%%%%%%%%%%%%% Enum Definitions %%%%%%%%%%%%%%%%%%%% -->
+<xs:simpleType name="ifaceEnum" final="restriction">
+    <xs:restriction base="xs:string">
+        <xs:enumeration value="SNDRV_CTL_ELEM_IFACE_MIXER"/>
+        <!-- Other iface enums may be added, as needed only -->
+    </xs:restriction>
+</xs:simpleType>
+
+<xs:simpleType name="typeEnum" final="restriction">
+    <xs:restriction base="xs:string">
+        <xs:enumeration value="SNDRV_CTL_ELEM_TYPE_ENUMERATED"/>
+        <xs:enumeration value="SNDRV_CTL_ELEM_TYPE_BYTES"/>
+        <xs:enumeration value="SNDRV_CTL_ELEM_TYPE_INTEGER"/>
+    </xs:restriction>
+</xs:simpleType>
+
+<xs:simpleType name="accessEnum" final="restriction">
+    <xs:restriction base="xs:string">
+        <xs:enumeration value="SNDRV_CTL_ELEM_ACCESS_READWRITE"/>
+        <xs:enumeration value="SNDRV_CTL_ELEM_ACCESS_TLV_READWRITE"/>
+    </xs:restriction>
+</xs:simpleType>
+
+<xs:simpleType name="daiEnum" final="restriction">
+    <xs:restriction base="xs:string">
+        <xs:enumeration value="none"/>
+        <xs:enumeration value="all_frontends"/>
+        <xs:enumeration value="tx_frontends"/>
+        <xs:enumeration value="rx_frontends"/>
+        <xs:enumeration value="all_backends"/>
+        <xs:enumeration value="tx_backends"/>
+        <xs:enumeration value="rx_backends"/>
+    </xs:restriction>
+</xs:simpleType>
+
+<!-- %%%%%%%%%%%%%%%%%%%% Type Definitions %%%%%%%%%%%%%%%%%%%% -->
+<xs:simpleType name="nameType">
+    <xs:restriction base="xs:string">
+        <!-- restrict leading or trailing whitespaces -->
+        <xs:pattern value="[^ ](.*[^ ])?"/>
+    </xs:restriction>
+</xs:simpleType>
+
+<xs:complexType name="integerType">
+    <xs:sequence>
+        <xs:element name="count" type="xs:integer"/>
+        <xs:element name="min" type="xs:integer"/>
+        <xs:element name="max" type="xs:integer"/>
+        <xs:element name="step" type="xs:integer"/>
+    </xs:sequence>
+</xs:complexType>
+
+<xs:complexType name="enumeratedType">
+    <xs:sequence>
+        <!-- may want to fill this in the future? -->
+    </xs:sequence>
+</xs:complexType>
+
+<xs:complexType name="valueType">
+    <xs:choice>
+        <xs:element name="integer" type="integerType"/>
+        <xs:element name="enumerated" type="enumeratedType"/>
+    </xs:choice>
+</xs:complexType>
+
+<xs:complexType name="extnType">
+    <xs:sequence>
+        <xs:element name="name" type="nameType"/>
+        <xs:element name="iface" type="ifaceEnum"/>
+        <xs:element name="type" type="typeEnum"/>
+        <xs:element name="access" type="accessEnum"/>
+        <xs:element name="dai_enum" type="daiEnum"/>
+        <xs:element name="value" type="valueType" minOccurs="0">
+        </xs:element>
+    </xs:sequence>
+</xs:complexType>
+
+<xs:complexType name="groupDAIGroup">
+    <xs:sequence>
+        <xs:element name="extn" type="extnType" maxOccurs="unbounded"/>
+    </xs:sequence>
+</xs:complexType>
+
+<!-- %%%%%%%%%%%%%%%%%%%% Structure Definition %%%%%%%%%%%%%%%%%%%% -->
+<xs:element name="ctl_extns">
+    <xs:complexType>
+        <xs:all>
+            <xs:element name="fe_common_extns" type="groupDAIGroup"/>
+            <xs:element name="fe_tx_extns" type="groupDAIGroup"/>
+            <xs:element name="fe_rx_extns" type="groupDAIGroup"/>
+            <xs:element name="be_common_extns" type="groupDAIGroup"/>
+            <xs:element name="be_tx_extns" type="groupDAIGroup" minOccurs="0"/>
+            <xs:element name="be_rx_extns" type="groupDAIGroup" minOccurs="0"/>
+        </xs:all>
+    </xs:complexType>
+</xs:element>
+</xs:schema>
