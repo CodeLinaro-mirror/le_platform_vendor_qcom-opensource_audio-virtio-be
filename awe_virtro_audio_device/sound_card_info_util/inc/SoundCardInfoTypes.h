@@ -66,6 +66,15 @@ enum MixerControlMode {
     EVENT_CONTROL,
 };
 
+enum VirtioPCMState {
+    VIRTIO_PCM_STATE_INVALID = -1,
+    VIRTIO_PCM_OPENED = 0,
+    VIRTIO_PCM_PREPARED,
+    VIRTIO_PCM_STARTED,
+    VIRTIO_PCM_STOPPED,
+    VIRTIO_PCM_CLOSED,
+};
+
 struct FrontendInfo {
     int id = -1;
     std::string name;
@@ -77,6 +86,8 @@ struct FrontendInfo {
     uint64_t    rates;
     uint8_t     channels_min;
     uint8_t     channels_max;
+
+    enum VirtioPCMState stream_state;
 };
 
 // The virtio driver requires that the enum value for a mixer ctl be sent as u8.

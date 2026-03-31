@@ -38,6 +38,7 @@ set(APIF_HEADERS
 # Project meta
 ################################################################################
 project(AweAudioPluginIntf)
+add_compile_options(-Werror)
 find_package(Threads)
 find_package(PkgConfig)
 pkg_check_modules(GLIB REQUIRED glib-2.0)

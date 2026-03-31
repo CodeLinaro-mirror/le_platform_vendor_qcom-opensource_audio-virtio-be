@@ -8,6 +8,8 @@ set(CMAKE_CXX_STANDARD 14)
 ################################################################################
 # Helpful 'set'
 ################################################################################
+add_compile_options(-Werror)
+
 # Let APIF stand for audio_plugin_intf
 set(ADM_PROJECT_NAME
     AweDeviceManager

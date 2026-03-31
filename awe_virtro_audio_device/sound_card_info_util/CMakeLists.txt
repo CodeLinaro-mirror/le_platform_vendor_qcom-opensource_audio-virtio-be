@@ -9,6 +9,8 @@ set(CMAKE_CXX_STANDARD 14)
 ################################################################################
 # Helpful 'set'
 ################################################################################
+add_compile_options(-Werror)
+
 # Let SCIU stand for SoundCardInfoUtil
 set(SCIU_PROJECT_NAME
     AweSoundCardInfoUtil

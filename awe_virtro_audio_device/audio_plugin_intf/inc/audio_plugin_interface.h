@@ -15,9 +15,9 @@
 
 using namespace std;
 
-enum AccessControl {
-  tlv_bytes = 0,
-  bytes,
+enum CtlElemAccessControl {
+  ACCESS_TLV_READWRITE = 0,
+  ACCESS_READWRITE,
 };
 
 enum SSRState {
@@ -30,7 +30,7 @@ struct CtlElemPayload {
   string name;
   uint32_t control_id;
   snd_ctl_elem_type_t type;   /* R: value type - SNDRV_CTL_ELEM_TYPE_* */
-  AccessControl access_control;
+  CtlElemAccessControl access_control;
   union {
     union {
       int32_t value[128];
@@ -66,8 +66,21 @@ struct PCMSetParams {
   /* indicates if this usecase is mmap. In mmap mode,
      the buffer config needs to be done in mmap call */
   __u8 is_mmap_noirq;
+
+  /* the dmabuf file descriptor for the data buffer */
+  __le64 buff_fd;
 };
 
+#if defined(__QNX__)
+struct PCMMmapParams {
+  uint64_t data_fd;
+  uint32_t data_size;
+  uint64_t pos_fd;
+  uint32_t pos_size;
+  uint32_t data_gvm_fd;
+  uint32_t pos_gvm_fd;
+};
+#else
 struct PCMMmapParams {
   uint32_t data_fd;
   uint32_t data_size;
@@ -76,6 +89,7 @@ struct PCMMmapParams {
   uint32_t data_gvm_fd;
   uint32_t pos_gvm_fd;
 };
+#endif
 
 class IAudioPlugin {
  public:
@@ -94,6 +108,7 @@ class IAudioPlugin {
   virtual uint32_t StreamStart(string fe_dai_name) = 0;
   virtual uint32_t StreamStop(string fe_dai_name) = 0;
   virtual uint32_t StreamWrite(struct virtio_snd_pcm_buf_msg &msg) = 0; // need to review payload
+  virtual uint32_t StreamWriteDone(struct virtio_snd_pcm_buf_msg &msg) = 0; // need to review payload
   virtual int StreamRead(struct virtio_snd_pcm_buf_msg &msg) = 0;  // need to review payload
   virtual uint32_t StreamMmap(string fe_dai_name, struct PCMMmapParams &msg) = 0;
   virtual int RegisterSSREvent(std::function<void(enum SSRState)> ssr_cb_func) = 0;

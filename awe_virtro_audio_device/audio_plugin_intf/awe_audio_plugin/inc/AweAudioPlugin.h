@@ -24,6 +24,7 @@
 #include "awe_status.h"
 #include "awe_types.h"
 #include "awe_manager.h"
+#include "awe_mixer_control.h"
 
 #define AWE_STREAM_EVENT_BUF_AVAIL                      0x1
 #define AWE_STREAM_EVENT_EOS                            0x2
@@ -38,6 +39,16 @@ enum AweStreamState {
   PCM_STATE_XRUN,
   PCM_STATE_DRAINING,
   PCM_STATE_SUSPENDED
+};
+
+/**
+ * Enum defining parameter operation types for RAW SET_PARAM and GET_PARAM
+ * PARAM_SET: Used for setParam to the DSP
+ * PARAM_GET: Used for getParam from the DSP
+ */
+enum AweRawParamType {
+    RAW_PARAM_SET = 0,
+    RAW_PARAM_GET = 1,
 };
 
 struct AweBufPool {
@@ -66,6 +77,7 @@ struct AweStream {
   uint32_t                              stream_event;
   AweBufPool                            buf_pool;
   uint32_t                              gvm_mmap_fd;
+  struct awe_buf_raw_info               raw_buff_info;
 };
 
 struct AweCtrlValue {
@@ -77,17 +89,10 @@ struct AweCtrlValue {
   //response from DSP, status, payload...
 };
 
-typedef struct AweCtrlVectorValue{
-    uint16_t offset;
-    uint16_t count;
-    uint32_t do_set;
-    union {
-        uint32_t integer[0];
-        uint32_t enumerated[0];
-        float floating[0];
-    }value;
-}AweCtrlVectorValue_t;
-
+// renamed to AweNamedCtrlVectorValue_t and typedef as awe_mixer_control_enumrated_control_vector_t
+// from awe_mixer_control.h
+typedef awe_mixer_control_enumerated_control_vector_t AweCtrlVectorValue_t;
+typedef awe_mixer_control_param_config_t AweRawCtrlVectorValue_t;
 
 struct GVMEventCallbackParams {
     uint32_t source_module_id;
@@ -119,6 +124,7 @@ class AweAudioPlugin : public IAudioPlugin {
         uint32_t StreamStart(string fe_dai_name) override;
         uint32_t StreamStop(string fe_dai_name) override;
         uint32_t StreamWrite(struct virtio_snd_pcm_buf_msg &msg) override;
+        uint32_t StreamWriteDone(struct virtio_snd_pcm_buf_msg &msg) override;
         int StreamRead(struct virtio_snd_pcm_buf_msg &msg) override;
         uint32_t StreamMmap(string fe_dai_name, struct PCMMmapParams &msg) override;
         int RegisterSSREvent(std::function<void(enum SSRState)> ssr_cb_func) override;
@@ -136,6 +142,11 @@ class AweAudioPlugin : public IAudioPlugin {
         int32_t AweShmemMapSMMU(AweCtrlValue *AweCtrl, awe_control_type_t type);
         int32_t AweShmemUnMapSMMU(AweCtrlValue *AweCtrl, awe_control_type_t type);
         uint32_t AweGetCoreErrorInfo(AweCtrlValue *AweCtrl);
+        uint32_t AweGetRawParam(AweCtrlValue *AweCtrl, const CtlElemPayload &ctl_elem_payload, AweRawParamType type);
+        uint32_t AweSetRawParam(AweCtrlValue *AweCtrl, const CtlElemPayload &ctl_elem_payload, AweRawParamType type);
+        void AweBuildRawCtlCommand(uint32_t **command_buf, uint32_t set_flag, AweRawCtrlVectorValue_t * param, uint32_t * command_buf_len);
+        void AweParamCtlComputeCrc(uint32_t *pMessage);
+        uint32_t StreamGetTimestamp(string fe_dai_name, int64_t *timestamp);
         std::unordered_map<string, AweStream*> fe_dai_awe_map_;
         std::unordered_map<string, AweCtrlValue*> kctrl_value_map_;
         vector<SoundCardMixerCtl> *all_mixer_ctl_;

@@ -7,7 +7,6 @@
 #include <chrono>
 #include <pthread.h>
 #include <sys/mman.h>
-#include <future>
 
 #ifdef ENABLE_RT_THREAD_PCMMSG
 #include "amss/compresmgr_client_api.h"
@@ -15,9 +14,16 @@
 
 #include "AudioDeviceManager.h"
 
-#define MAX_HAB_BUFFER_SIZE 4096
 #define RT_THREAD_PCMMSG_DEFAULT_POLICY SCHED_FIFO
 #define RT_THREAD_PCMMSG_DEFAULT_PRIORITY 45
+#define STOP_TIMEOUT_MS 1000
+
+#define SLEEP_US(us) do { \
+    struct timespec ts; \
+    ts.tv_sec = (us) / 1000000; \
+    ts.tv_nsec = ((us) % 1000000) * 1000; \
+    clock_nanosleep(CLOCK_MONOTONIC, 0, &ts, NULL);\
+} while (0)
 
 using namespace std::placeholders;
 
@@ -65,17 +71,28 @@ AudioDeviceManager::~AudioDeviceManager()
     {
         for (auto &it2: it.second)
         {
-           {
-              std::lock_guard<std::mutex> stream_queue_lock(it2.second->stream_mutex);
-              it2.second->msg_queue.push(nullptr);
-           }
-
-          it2.second->stream_cond.notify_one();
-          if (it2.second->thread_obj.joinable())
-              it2.second->thread_obj.join();
-          delete it2.second;
+            it2.second->stop_flag.store(true);
+            it2.second->stream_cond.notify_all();
+            if (it2.second->thread_obj.joinable())
+            {
+                it2.second->thread_obj.join();
+            }
         }
     }
+
+    for (auto &it: pcm_pending_threads_)
+    {
+        for (auto &it2: it.second)
+        {
+            it2.second->stop_flag.store(true);
+            it2.second->stream_cond.notify_all();
+            if (it2.second->thread_obj.joinable())
+            {
+                it2.second->thread_obj.join();
+            }
+        }
+    }
+
 }
 #ifdef OFF_TARGET_UNIT_TEST
 void AudioDeviceManager::EmptyFuncSockinfo(struct SocketInfo sock_info)
@@ -127,6 +144,40 @@ void AudioDeviceManager::OpenCommChannel(uint32_t mmid)
         }
 
         sock_info.mmid = mmid;
+        {
+            std::lock_guard<std::mutex> lk(vcid_map_mutex);
+            vcid_map_[sock_info.vmid][mmid] = sock_info.vcid;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(snd_card_init_mutex);
+            // If vmid has already been initialized, do not insert again
+            bool already_inited =
+                (all_fe_dais_.find(sock_info.vmid) != all_fe_dais_.end()) ||
+                (all_mixer_ctls_.find(sock_info.vmid) != all_mixer_ctls_.end()) ||
+                (plugin_utils_.find(sock_info.vmid) != plugin_utils_.end());
+
+            if (!already_inited) {
+                AWE_LOGI("Building sound card for vmid %d", sock_info.vmid);
+
+                struct PluginUtils utils;
+                utils.sciu = isciu_;
+
+                std::pair<int32_t, std::vector<FrontendInfo>>fe_dais(sock_info.vmid, *fe_info_);
+                all_fe_dais_.insert(fe_dais);
+
+                std::pair<int32_t, std::vector<SoundCardMixerCtl>>mixer_ctls(sock_info.vmid, *sc_mixer_ctl_);
+                all_mixer_ctls_.insert(mixer_ctls);
+
+                utils.pcm_plugin = iaudio_plugin_;
+                plugin_utils_.insert(std::pair<int32_t, struct PluginUtils>(sock_info.vmid, utils));
+
+                AWE_LOGI("SoundCard Built");
+            } else {
+                AWE_LOGI("Built sound card for vmid %d already done, skip re-insert", sock_info.vmid);
+            }
+        }
+
         switch (mmid) {
             case MM_AUD_1:
                 AWE_LOGI("Launching CtlQueueFunc, mmid: %d, vmid: %d", mmid, sock_info.vmid);
@@ -171,27 +222,8 @@ void AudioDeviceManager::CtlQueueFunc(struct SocketInfo sock_info)
     int32_t ret = 0;
     char *buff = nullptr;
     uint32_t buff_size;
-    std::future<uint32_t> future;
-    std::future<uint32_t> stop_future;
-    std::future<uint32_t> release_future;
-    struct virtio_snd_hdr *hdr;
 
     AWE_LOGI("Enter");
-
-    struct PluginUtils utils;
-    utils.sciu = isciu_;
-
-    AWE_LOGI("SoundCard Built");
-
-    std::pair<int32_t, std::vector<FrontendInfo>> fe_dais(sock_info.vmid, *fe_info_);
-    all_fe_dais_.insert(fe_dais);
-
-    std::pair<int32_t, std::vector<SoundCardMixerCtl>> mixer_ctls(sock_info.vmid, *sc_mixer_ctl_);
-    all_mixer_ctls_.insert(mixer_ctls);
-
-    utils.pcm_plugin = iaudio_plugin_;
-    plugin_utils_.insert(std::pair<int32_t, struct PluginUtils>(sock_info.vmid, utils));
-    AWE_LOGI("CSD2AP Built");
 
     buff = static_cast<char*>(calloc(1, MAX_HAB_BUFFER_SIZE));
     if (buff == nullptr){
@@ -213,49 +245,69 @@ void AudioDeviceManager::CtlQueueFunc(struct SocketInfo sock_info)
         {
             AWE_LOGE("receive failed, ret %d", ret);
             if (ret == -ENODEV) {
-                for (auto &iter: pcm_stream_threads_[sock_info.vmid]) {
-                    {
-                        std::unique_lock<std::mutex> stream_lock(iter.second->stream_mutex);
-                        iter.second->stream_cond.wait(stream_lock, [stream=iter.second] {
-                                                      return stream->msg_queue.empty();
-                                                      });
+                // stop pcm thread and pending thread
+                {
+                    std::unique_lock<std::mutex> pcm_threads_lock(pcm_stream_threads_mutex);
+                    for (auto &iter: pcm_stream_threads_[sock_info.vmid]) {
+                        auto pcm_thread_ptr = iter.second;
+                        pcm_threads_lock.unlock();
+                        pcm_thread_ptr->stop_flag.store(true);
+                        pcm_thread_ptr->stream_cond.notify_all();
+                        if (pcm_thread_ptr->thread_obj.joinable())
+                            pcm_thread_ptr->thread_obj.join();
+
+                        {
+                            std::lock_guard<std::mutex> stream_lock(pcm_thread_ptr->stream_mutex);
+                            while (!pcm_thread_ptr->msg_queue.empty()) {
+                                auto msg = pcm_thread_ptr->msg_queue.front();
+                                pcm_thread_ptr->msg_queue.pop();
+                                if (msg) {
+                                    free(msg); // free only since hab error
+                                }
+                            }
+                        }
+                        pcm_threads_lock.lock();
                     }
 
-                    iter.second->msg_queue.push(nullptr);
-                    iter.second->stream_cond.notify_all();
-                    if (iter.second->thread_obj.joinable())
-                        iter.second->thread_obj.join();
+                    for (auto &iter: pcm_pending_threads_[sock_info.vmid]) {
+                        auto pcm_pending_thread_ptr = iter.second;
+                        pcm_threads_lock.unlock();
+                        pcm_pending_thread_ptr->stop_flag.store(true);
+                        pcm_pending_thread_ptr->stream_cond.notify_all();
+                        if (pcm_pending_thread_ptr->thread_obj.joinable())
+                            pcm_pending_thread_ptr->thread_obj.join();
 
-                    if (plugin_utils_[sock_info.vmid].pcm_plugin) {
-                        stop_future = std::async(std::launch::async, [&]() {
-                            return plugin_utils_[sock_info.vmid].pcm_plugin->StreamStop(iter.first);
-                        });
-
-                        release_future = std::async(std::launch::async, [&]() {
-                            return plugin_utils_[sock_info.vmid].pcm_plugin->StreamRelease(iter.first);
-                        });
-
-                        if (stop_future.wait_for(std::chrono::seconds(1)) == std::future_status::timeout) {
-                            AWE_LOGE("StreamStop timeout, skip and continue");
-                        } else {
-                            ret = stop_future.get();
+                        {
+                            std::lock_guard<std::mutex> stream_lock(pcm_pending_thread_ptr->stream_mutex);
+                            while (!pcm_pending_thread_ptr->msg_queue.empty()) {
+                                auto msg = pcm_pending_thread_ptr->msg_queue.front();
+                                pcm_pending_thread_ptr->msg_queue.pop();
+                                if (msg) {
+                                    free(msg); // free only since hab error
+                                }
+                            }
                         }
-
-                        if (release_future.wait_for(std::chrono::seconds(1)) == std::future_status::timeout) {
-                            AWE_LOGE("StreamRelease timeout, skip and continue");
-                        } else {
-                            ret = release_future.get();
-                        }
+                        pcm_threads_lock.lock();
                     }
-
-                    delete iter.second;
                 }
 
-                for (auto &iter : dma_export_map_[sock_info.vmid]) {
-                    uint32_t export_id = iter.second.export_id;
-                    int heap_fd = iter.second.fd;
-                    uint32_t vcid = iter.second.vcid;
-                    ihab_->Unimport(vcid, export_id, (void*)(uintptr_t)heap_fd, HABMM_IMPORT_FLAGS_CACHED | HABMM_EXPIMP_FLAGS_FD);
+                // stop gvm session
+                for (auto &iter: pcm_stream_threads_[sock_info.vmid]) {
+                    if (plugin_utils_[sock_info.vmid].pcm_plugin) {
+                        plugin_utils_[sock_info.vmid].pcm_plugin->StreamStop(iter.first);
+                        plugin_utils_[sock_info.vmid].pcm_plugin->StreamRelease(iter.first);
+                    }
+                }
+
+                // unimport DMA
+                {
+                    std::unique_lock<std::mutex> dma_map_lock(dma_export_map_mutex);
+                    for (auto &iter : dma_export_map_[sock_info.vmid]) {
+                        uint32_t export_id = iter.second.export_id;
+                        uint64_t heap_fd = iter.second.fd;
+                        uint32_t vcid = iter.second.vcid;
+                        ihab_->Unimport(vcid, export_id, (void*)heap_fd, HABMM_IMPORT_FLAGS_CACHED | HABMM_EXPIMP_FLAGS_FD);
+                    }
                 }
 
                 for (auto &iter : push_pull_map_[sock_info.vmid]) {
@@ -267,30 +319,27 @@ void AudioDeviceManager::CtlQueueFunc(struct SocketInfo sock_info)
                     ihab_->Unimport(sock_info.vcid, pos_export_id, (void*)(uintptr_t)pos_fd, HABMM_IMPORT_FLAGS_CACHED | HABMM_EXPIMP_FLAGS_FD);
                 }
 
+                // close hab
                 ihab_->Close(sock_info.vcid);
 
+                // reset resource table
                 dma_export_map_[sock_info.vmid].clear();
+                pcm_stream_threads_[sock_info.vmid].clear();
+                pcm_pending_threads_[sock_info.vmid].clear();
                 push_pull_map_[sock_info.vmid].clear();
-                pcm_stream_threads_.erase(sock_info.vmid);
                 break;
             }
         }
         else
         {
-            hdr = (struct virtio_snd_hdr*)buff;
-
-            future = std::async(std::launch::async, [&]() {
-                return ProcessCtlMsg(buff, buff_size, sock_info);
-            });
-
-            if (future.wait_for(std::chrono::seconds(1)) == std::future_status::timeout) {
-                AWE_LOGE("ProcessCtlMsg hdr->code:%04x timeout, skip and continue", hdr->code);
-                continue;
-            }
-
-            buff_size = future.get();
+            struct virtio_snd_hdr *hdr = (struct virtio_snd_hdr*) buff;
+            buff_size = ProcessCtlMsg(buff, buff_size, sock_info);
             AWE_LOGD("Sending response to virtio-snd, size: %d", buff_size);
-            ihab_->Send(sock_info.vcid, buff, buff_size, 0);
+            ret = ihab_->Send(sock_info.vcid, buff, buff_size, 0);
+            if(ret)
+            {
+                AWE_LOGE("Fail to send command[0x%x] response, ret with %d", hdr->code, ret);
+            }
         }
 #ifdef OFF_TARGET_UNIT_TEST
         return;
@@ -356,25 +405,22 @@ void AudioDeviceManager::PCMQueueFunc(struct SocketInfo sock_info)
         }
         else
         {
-            stream_id = ((struct virtio_pcm_msg*)pcm_msg)->xfer.stream_id;
+            stream_id = pcm_msg->xfer.stream_id;
             fe_dai_name = all_fe_dais_[sock_info.vmid][stream_id].name;
-            struct PCMMsgArgs args = {stream_id, sock_info, direction};
-            if (pcm_stream_threads_[sock_info.vmid].find(fe_dai_name) == pcm_stream_threads_[sock_info.vmid].end()) {
-#ifdef OFF_TARGET_UNIT_TEST
-                std::function<void(PCMMsgArgs)> pcm_func = std::bind(&AudioDeviceManager::EmptyFuncPCMMsgArgs, this, _1);
-#else
-                std::function<void(PCMMsgArgs)> pcm_func = std::bind(&AudioDeviceManager::ProcessPCMMsg, this, _1);
-#endif
-              PCMStreamThread *stream_thread = new PCMStreamThread;
-              pcm_stream_threads_[sock_info.vmid][fe_dai_name] = stream_thread;
-              stream_thread->thread_obj = std::thread(pcm_func, args);
-            }
             {
-              std::lock_guard<std::mutex> stream_queue_lock(pcm_stream_threads_[sock_info.vmid][fe_dai_name]->stream_mutex);
-              pcm_stream_threads_[sock_info.vmid][fe_dai_name]->msg_queue.push(pcm_msg);
+                std::lock_guard<std::mutex> pcm_thread_lock(pcm_stream_threads_mutex);
+                if (pcm_stream_threads_[sock_info.vmid].find(fe_dai_name) != pcm_stream_threads_[sock_info.vmid].end()) {
+                    {
+                      std::lock_guard<std::mutex> stream_queue_lock(pcm_stream_threads_[sock_info.vmid][fe_dai_name]->stream_mutex);
+                      pcm_stream_threads_[sock_info.vmid][fe_dai_name]->msg_queue.push(pcm_msg);
+                    }
+                    pcm_stream_threads_[sock_info.vmid][fe_dai_name]->stream_cond.notify_one();
+                }
+                else {
+                    AWE_LOGE("Cannot find pcm thread for stream_id %d, dropping pcm msg", stream_id);
+                    DropPcmMsg(sock_info.vcid, pcm_msg);
+                }
             }
-            if (pcm_stream_threads_[sock_info.vmid][fe_dai_name])
-                pcm_stream_threads_[sock_info.vmid][fe_dai_name]->stream_cond.notify_one();
         }
 #ifdef OFF_TARGET_UNIT_TEST
         return;
@@ -403,6 +449,13 @@ void AudioDeviceManager::EventQueueFunc(struct SocketInfo sock_info)
 #ifdef OFF_TARGET_UNIT_TEST
         return;
 #endif
+    }
+
+    if (plugin_utils_[sock_info.vmid].pcm_plugin == nullptr) {
+        AWE_LOGE("EventQueueFunc failed to find sock_info.vmid: %u", sock_info.vmid);
+        free(buff);
+        buff = nullptr;
+        return;
     }
 
     // Register callback for event
@@ -467,6 +520,56 @@ void AudioDeviceManager::EventCallbackFunc(struct SocketInfo sock_info, uint32_t
     AWE_LOGI("EventCallbackFunc: Exit");
 }
 
+// Single CTL HAB QUEUE guarantees the CTL msg commands are serialized
+void AudioDeviceManager::UpdatePcmDeviceState(int32_t vmid, int32_t fe_stream_id, int32_t hdr_code)
+{
+    struct FrontendInfo& fe_info = all_fe_dais_[vmid][fe_stream_id];
+
+    switch (hdr_code) {
+        case VIRTIO_SND_R_PCM_SET_PARAMS:
+            fe_info.stream_state = VIRTIO_PCM_OPENED;
+            break;
+        case VIRTIO_SND_R_PCM_PREPARE:
+            fe_info.stream_state = VIRTIO_PCM_PREPARED;
+            break;
+        case VIRTIO_SND_R_PCM_START:
+            fe_info.stream_state = VIRTIO_PCM_STARTED;
+            break;
+        case VIRTIO_SND_R_PCM_STOP:
+            fe_info.stream_state = VIRTIO_PCM_STOPPED;
+            break;
+        case VIRTIO_SND_R_PCM_RELEASE:
+            fe_info.stream_state = VIRTIO_PCM_CLOSED;
+            break;
+        default:
+            AWE_LOGE("Invalid Args");
+            return;
+    }
+
+    AWE_LOGI("Update stream_id:%d, FE:%s state to: %d",
+        fe_stream_id, fe_info.name.c_str(), (int32_t)fe_info.stream_state);
+}
+
+// DropPCMMSG is used to avoid processing PCM messages when stream is stopped or closed
+void AudioDeviceManager::DropPcmMsg(int32_t vcid, struct virtio_pcm_msg *msg)
+{
+    if(!msg) {
+        AWE_LOGE("msg is null");
+        return;
+    }
+    msg->status.status = VIRTIO_SND_S_IO_ERR;
+    msg->length += sizeof(msg->status);
+    ihab_->Send(vcid, msg, sizeof(struct virtio_pcm_msg), 0);
+    AWE_LOGI("drop pcm msg and send a dummy response ");
+    free(msg);
+}
+enum VirtioPCMState AudioDeviceManager::GetPcmDeviceState(int32_t vmid, int32_t fe_stream_id)
+{
+    struct FrontendInfo& fe_info = all_fe_dais_[vmid][fe_stream_id];
+
+    return fe_info.stream_state;
+}
+
 uint32_t AudioDeviceManager::ProcessCtlMsg(void *buff, uint32_t buff_size, struct SocketInfo sock_info)
 {
     struct virtio_snd_hdr *hdr = (struct virtio_snd_hdr*) buff;
@@ -478,6 +581,10 @@ uint32_t AudioDeviceManager::ProcessCtlMsg(void *buff, uint32_t buff_size, struc
     }
 
     switch (hdr->code) {
+        case VIRTIO_SND_R_VERSION:
+          ProcessVersion(*(struct virtio_snd_version_msg*)buff);
+          buff_size = sizeof(struct virtio_snd_version_msg);
+          break;
         case VIRTIO_SND_R_PCM_COUNT:
           ProcessPCMCount(*(struct virtio_snd_count_msg*)buff, gvm_id);
           buff_size = sizeof(struct virtio_snd_count_msg);
@@ -506,7 +613,7 @@ uint32_t AudioDeviceManager::ProcessCtlMsg(void *buff, uint32_t buff_size, struc
           break;
 
         case VIRTIO_SND_R_PCM_SET_PARAMS:
-          ProcessPCMSetParams(*(struct virtio_snd_pcm_set_params_msg*)buff, gvm_id);
+          ProcessPCMSetParams(*(struct virtio_snd_pcm_set_params_msg*)buff, sock_info);
           buff_size = sizeof(struct virtio_snd_pcm_set_params_msg);
           break;
 
@@ -539,7 +646,7 @@ uint32_t AudioDeviceManager::ProcessCtlMsg(void *buff, uint32_t buff_size, struc
 
         case VIRTIO_SND_R_DC_TLV_READ:
           ProcessDCTlvRead(*(struct virtio_snd_dc_tlv_read_msg*)buff, gvm_id);
-          buff_size = sizeof(struct virtio_snd_dc_hdr) + sizeof(virtio_snd_hdr) + 1024;
+          buff_size = sizeof(struct virtio_snd_dc_hdr) + sizeof(virtio_snd_hdr) + MAX_TLV_SIZE;
           break;
 
         case VIRTIO_SND_R_DC_TLV_WRITE:
@@ -559,6 +666,14 @@ uint32_t AudioDeviceManager::ProcessCtlMsg(void *buff, uint32_t buff_size, struc
     }
 
     return buff_size;
+}
+
+void AudioDeviceManager::ProcessVersion(struct virtio_snd_version_msg &buff)
+{
+    AWE_LOGI("Enter");
+    buff.response.code = VIRTIO_SND_S_OK;
+    buff.version = VSND_VERSION_2;
+    AWE_LOGI("Backend version is %d", buff.version == VSND_VERSION_1 ? 1 : 2);
 }
 
 void AudioDeviceManager::ProcessPCMCount(struct virtio_snd_count_msg &buff, unsigned int gvm_id)
@@ -719,11 +834,18 @@ uint32_t AudioDeviceManager::ProcessDCEnumInfo(struct virtio_snd_dc_enum_info_ms
     return size;
  }
 
-void AudioDeviceManager::ProcessPCMSetParams(struct virtio_snd_pcm_set_params_msg &buff, unsigned int gvm_id)
+void AudioDeviceManager::ProcessPCMSetParams(struct virtio_snd_pcm_set_params_msg &buff, struct SocketInfo sock_info)
  {
-    uint32_t ret;
     struct PCMSetParams pcm_params;
     struct FrontendInfo fe_info;
+    int32_t ret = -EINVAL;
+    uint64_t heap_fd = -1;
+    struct DMAExport dma_area_map;
+    uint32_t export_id;
+    uint32_t dma_bytes;
+    unsigned int gvm_id = sock_info.vmid;
+    struct PCMMsgArgs args;
+    int direction, pcm_mmid, pcm_vcid;
 
     AWE_LOGD("Enter");
 
@@ -735,6 +857,44 @@ void AudioDeviceManager::ProcessPCMSetParams(struct virtio_snd_pcm_set_params_ms
     }
 
     fe_info = all_fe_dais_[gvm_id][buff.request.hdr.stream_id];
+    direction = fe_info.direction;
+#if !defined(__QNX__)
+    pcm_mmid = (direction == SNDRV_PCM_STREAM_PLAYBACK ? MM_AUD_4 : MM_AUD_3);
+#else
+    pcm_mmid = (direction == VIRTIO_STREAM_PLAYBACK ?  MM_AUD_4 : MM_AUD_3);
+#endif
+    pcm_vcid = vcid_map_[gvm_id][pcm_mmid];
+    export_id = buff.request.export_id;
+    dma_bytes = buff.request.dma_bytes;
+
+    if (!buff.request.is_mmap_noirq) {
+        {
+            std::lock_guard<std::mutex> lock(dma_export_map_mutex);
+            if (dma_export_map_[gvm_id].find(fe_info.id) != dma_export_map_[gvm_id].end()) {
+                AWE_LOGE("Notice!!! Warning!!!, fe:%s dma was not cleaned up in previous session", fe_info.name.c_str());
+                ret = -1;
+                goto response;
+            }
+        }
+
+        ret = ihab_->Import(pcm_vcid, (void**)&heap_fd, dma_bytes,
+                            export_id, HABMM_IMPORT_FLAGS_CACHED | HABMM_EXPIMP_FLAGS_FD);
+        AWE_LOGD("Import vcid %x, export id %d, ret value %d", pcm_vcid, export_id, ret);
+        if (ret) {
+            AWE_LOGE("Hab Import failed, skipping setParam operation");
+            goto response;
+        }
+
+        dma_area_map.export_id = export_id;
+        dma_area_map.fd = heap_fd;
+        dma_area_map.vcid = pcm_vcid;
+
+        {
+            std::lock_guard<std::mutex> lock(dma_export_map_mutex);
+            dma_export_map_[gvm_id][fe_info.id] = dma_area_map;
+        }
+    }
+
     pcm_params.buffer_bytes = buff.request.buffer_bytes;
     pcm_params.period_bytes = buff.request.period_bytes;
     pcm_params.features = buff.request.features;
@@ -742,21 +902,68 @@ void AudioDeviceManager::ProcessPCMSetParams(struct virtio_snd_pcm_set_params_ms
     pcm_params.rate = buff.request.rate;
     pcm_params.channels = buff.request.channels;
     pcm_params.is_mmap_noirq = buff.request.is_mmap_noirq;
+    pcm_params.buff_fd = heap_fd;
 
     ret = plugin_utils_[gvm_id].pcm_plugin->StreamSetParam(fe_info.name, pcm_params);
+    if (ret) {
+        AWE_LOGE("StreamSetParam failed for stream %s", fe_info.name.c_str());
+        goto response;
+    }
 
+    UpdatePcmDeviceState(gvm_id, buff.request.hdr.stream_id, buff.request.hdr.hdr.code);
+
+    args.stream_id = buff.request.hdr.stream_id;
+    args.sock_info = {pcm_vcid, pcm_mmid, (int32_t)gvm_id};
+    args.direction = direction;
+
+    /* both queue need to be clean */
+    {
+        std::lock_guard<std::mutex> pcm_threads_lock(pcm_stream_threads_mutex);
+        if (pcm_stream_threads_[sock_info.vmid].find(fe_info.name) != pcm_stream_threads_[sock_info.vmid].end() ||
+            pcm_pending_threads_[sock_info.vmid].find(fe_info.name) != pcm_pending_threads_[sock_info.vmid].end()) {
+            AWE_LOGE("Error !!! Pcm thread %s not cleaned up from previous session", fe_info.name.c_str());
+            ret = -1;
+            goto response;
+        }
+    }
+    {
+#ifdef OFF_TARGET_UNIT_TEST
+        std::function<void(PCMMsgArgs)> pcm_func = std::bind(&AudioDeviceManager::EmptyFuncPCMMsgArgs, this, _1);
+#else
+        std::function<void(PCMMsgArgs)> pcm_pending_func = std::bind(&AudioDeviceManager::ProcessPCMPendingMsg, this, _1);
+        std::function<void(PCMMsgArgs)> pcm_func = std::bind(&AudioDeviceManager::ProcessPCMMsg, this, _1);
+#endif
+
+        auto pending_thread = std::make_shared<PCMStreamThread>();
+        auto stream_thread = std::make_shared<PCMStreamThread>();
+        {
+            std::lock_guard<std::mutex> pcm_threads_lock(pcm_stream_threads_mutex);
+            pcm_pending_threads_[sock_info.vmid][fe_info.name] = pending_thread;
+            pcm_stream_threads_[sock_info.vmid][fe_info.name] = stream_thread;
+        }
+
+        AWE_LOGD("Starting pcm thread for %s", fe_info.name.c_str());
+        stream_thread->in_flight_cnt = -1; // -1 for running
+        pending_thread->thread_obj = std::thread(pcm_pending_func, args);
+        stream_thread->thread_obj = std::thread(pcm_func, args);
+    }
+
+response:
     if (!ret)
         buff.response.code = VIRTIO_SND_S_OK;
     else
         buff.response.code = VIRTIO_SND_S_IO_ERR;
+
+    return;
  }
 
 void AudioDeviceManager::ProcessPCMPrepare(struct virtio_snd_pcm_prepare_msg &buff, struct SocketInfo sock_info)
  {
-    uint32_t ret;
+    int32_t ret;
     struct FrontendInfo fe_info;
     struct virtio_pcm_msg *msg = nullptr;
-    int32_t vcid;
+    int32_t pcm_vcid;
+    int pcm_mmid;
 
     AWE_LOGD("Enter");
 
@@ -769,46 +976,107 @@ void AudioDeviceManager::ProcessPCMPrepare(struct virtio_snd_pcm_prepare_msg &bu
 
     fe_info = all_fe_dais_[sock_info.vmid][buff.request.stream_id];
 
-    if (buff.request.hdr.code == VIRTIO_SND_R_PCM_PREPARE)
+    if (buff.request.hdr.code == VIRTIO_SND_R_PCM_PREPARE) {
         ret = plugin_utils_[sock_info.vmid].pcm_plugin->StreamPrepare(fe_info.name);
+        if (!ret) {
+            UpdatePcmDeviceState(sock_info.vmid, buff.request.stream_id, buff.request.hdr.code);
 
+            std::lock_guard<std::mutex> pcm_threads_lock(pcm_stream_threads_mutex);
+            if (pcm_stream_threads_[sock_info.vmid].find(fe_info.name) !=
+                                    pcm_stream_threads_[sock_info.vmid].end()) {
+
+                std::lock_guard<std::mutex> stream_lock(
+                            pcm_stream_threads_[sock_info.vmid][fe_info.name]->stream_mutex);
+                pcm_stream_threads_[sock_info.vmid][fe_info.name]->in_flight_cnt = -1; // reset to -1 for resume
+            }
+        }
+    }
     else {
-        if (pcm_stream_threads_[sock_info.vmid].find(fe_info.name) == pcm_stream_threads_[sock_info.vmid].end()) {
-            AWE_LOGE("ProcessPCMPrepare failed to find fe dai name: %s", fe_info.name.c_str());
-        } else {
-            auto& by_name = pcm_stream_threads_[sock_info.vmid];
-            auto it = by_name.find(fe_info.name);
-            auto* stream = it->second;
-            // drain existing messages with IO_ERR
-            while (!stream->msg_queue.empty()) {
-                msg = stream->msg_queue.front();
-                stream->msg_queue.pop();
-                msg->status.status = VIRTIO_SND_S_IO_ERR;
-                msg->length += sizeof(msg->status);
-                ihab_->Send(sock_info.vcid, msg, sizeof(struct virtio_pcm_msg), 0);
-                free(msg);
+#if !defined(__QNX__)
+        pcm_mmid = (fe_info.direction == SNDRV_PCM_STREAM_PLAYBACK ? MM_AUD_4 : MM_AUD_3);
+#else
+        pcm_mmid = (fe_info.direction == VIRTIO_STREAM_PLAYBACK ? MM_AUD_4 : MM_AUD_3);
+#endif
+        pcm_vcid = vcid_map_[sock_info.vmid][pcm_mmid];
+        UpdatePcmDeviceState(sock_info.vmid, buff.request.stream_id, buff.request.hdr.code);
+
+        {
+            std::unique_lock<std::mutex> pcm_threads_lock(pcm_stream_threads_mutex);
+            auto it = pcm_stream_threads_[sock_info.vmid].find(fe_info.name);
+            if ( it != pcm_stream_threads_[sock_info.vmid].end()) {
+                auto pcm_thread_ptr = it->second;
+                pcm_threads_lock.unlock();
+
+                pcm_thread_ptr->stop_flag.store(true);
+                pcm_thread_ptr->stream_cond.notify_all();
+                if (pcm_thread_ptr->thread_obj.joinable())
+                    pcm_thread_ptr->thread_obj.join();
+
+                {
+                    std::lock_guard<std::mutex> stream_lock(pcm_thread_ptr->stream_mutex);
+                    while (!pcm_thread_ptr->msg_queue.empty())
+                    {
+                        msg = pcm_thread_ptr->msg_queue.front();
+                        pcm_thread_ptr->msg_queue.pop();
+                        if (msg) {
+                            AWE_LOGE("Reach msg drop for gvm %d dai %s !",
+                                    sock_info.vmid, fe_info.name.c_str());
+                            DropPcmMsg(pcm_vcid, msg);
+                        }
+                    }
+                }
+
+                pcm_threads_lock.lock();
+                pcm_stream_threads_[sock_info.vmid].erase(fe_info.name);
             }
-            // Terminate the worker cleanly
-            std::lock_guard<std::mutex> lk(stream->stream_mutex);
-            stream->msg_queue.push(nullptr);
-            stream->stream_cond.notify_one();
-            if (stream->thread_obj.joinable()) {
-                stream->thread_obj.join();
+
+            auto it2 = pcm_pending_threads_[sock_info.vmid].find(fe_info.name);
+            if ( it2 != pcm_pending_threads_[sock_info.vmid].end()) {
+                auto pcm_pending_thread_ptr = it2->second;
+                pcm_threads_lock.unlock();
+
+                pcm_pending_thread_ptr->stop_flag.store(true);
+                pcm_pending_thread_ptr->stream_cond.notify_all();
+                if (pcm_pending_thread_ptr->thread_obj.joinable())
+                    pcm_pending_thread_ptr->thread_obj.join();
+
+                {
+                    std::lock_guard<std::mutex> stream_lock(pcm_pending_thread_ptr->stream_mutex);
+                    while (!pcm_pending_thread_ptr->msg_queue.empty())
+                    {
+                        msg = pcm_pending_thread_ptr->msg_queue.front();
+                        pcm_pending_thread_ptr->msg_queue.pop();
+                        if (msg) {
+                            AWE_LOGE("Reach msg drop for gvm %d dai %s !",
+                                    sock_info.vmid, fe_info.name.c_str());
+                            DropPcmMsg(pcm_vcid, msg);
+                        }
+                    }
+                }
+
+                pcm_threads_lock.lock();
+                pcm_pending_threads_[sock_info.vmid].erase(fe_info.name);
             }
-            delete stream;
-            by_name.erase(it);
         }
 
         ret = plugin_utils_[sock_info.vmid].pcm_plugin->StreamRelease(fe_info.name);
 
-        if (dma_export_map_[sock_info.vmid].find(fe_info.id) != dma_export_map_[sock_info.vmid].end()) {
-          uint32_t export_id = dma_export_map_[sock_info.vmid][fe_info.id].export_id;
-          uint64_t heap_fd = dma_export_map_[sock_info.vmid][fe_info.id].fd;
-          uint32_t vcid = dma_export_map_[sock_info.vmid][fe_info.id].vcid;
-          ihab_->Unimport(vcid, export_id, (void*)heap_fd, HABMM_IMPORT_FLAGS_CACHED | HABMM_EXPIMP_FLAGS_FD);
-          dma_export_map_[sock_info.vmid].erase(fe_info.id);
+        {
+            std::unique_lock<std::mutex> dma_map_lock(dma_export_map_mutex);
+            if (dma_export_map_[sock_info.vmid].find(fe_info.id) != dma_export_map_[sock_info.vmid].end()) {
+                uint32_t export_id = dma_export_map_[sock_info.vmid][fe_info.id].export_id;
+                uint64_t heap_fd = dma_export_map_[sock_info.vmid][fe_info.id].fd;
+                uint32_t vcid = dma_export_map_[sock_info.vmid][fe_info.id].vcid;
+                dma_export_map_[sock_info.vmid].erase(fe_info.id);
+                dma_map_lock.unlock();
+
+                AWE_LOGD("Unimporting export id %d pcm id %d", export_id, fe_info.id);
+                ret = ihab_->Unimport(vcid, export_id, (void*)heap_fd, HABMM_IMPORT_FLAGS_CACHED | HABMM_EXPIMP_FLAGS_FD);
+                AWE_LOGD("Unimport export id %d returned %d", export_id, ret);
+            }
         }
-        else if (push_pull_map_[sock_info.vmid].find(fe_info.id) != push_pull_map_[sock_info.vmid].end()) {
+
+        if (push_pull_map_[sock_info.vmid].find(fe_info.id) != push_pull_map_[sock_info.vmid].end()) {
           uint32_t data_export_id = push_pull_map_[sock_info.vmid][fe_info.id].data_export_id;
           uint32_t pos_export_id = push_pull_map_[sock_info.vmid][fe_info.id].pos_export_id;
           uint32_t data_fd = push_pull_map_[sock_info.vmid][fe_info.id].data_fd;
@@ -819,16 +1087,19 @@ void AudioDeviceManager::ProcessPCMPrepare(struct virtio_snd_pcm_prepare_msg &bu
           push_pull_map_[sock_info.vmid].erase(fe_info.id);
         }
     }
+
     if (!ret)
         buff.response.code = VIRTIO_SND_S_OK;
     else
         buff.response.code = VIRTIO_SND_S_IO_ERR;
+
+    return;
  }
 
 void AudioDeviceManager::ProcessPCMTrigger(struct virtio_snd_pcm_trigger_msg &buff, unsigned int gvm_id)
  {
-    uint32_t ret = 0;
     struct FrontendInfo fe_info;
+    int32_t ret = 0;
 
     AWE_LOGD("Enter");
 
@@ -841,28 +1112,89 @@ void AudioDeviceManager::ProcessPCMTrigger(struct virtio_snd_pcm_trigger_msg &bu
 
     fe_info = all_fe_dais_[gvm_id][buff.request.stream_id];
 
-    if (buff.request.hdr.code == VIRTIO_SND_R_PCM_START)
+    if (buff.request.hdr.code == VIRTIO_SND_R_PCM_START) {
         ret = plugin_utils_[gvm_id].pcm_plugin->StreamStart(fe_info.name);
-    else {
-        if (pcm_stream_threads_[gvm_id].find(fe_info.name) != pcm_stream_threads_[gvm_id].end()) {
+        if (!ret) {
+            std::unique_lock<std::mutex> lock(pcm_stream_threads_mutex);
+            auto pcm_thread_ptr = pcm_stream_threads_[gvm_id][fe_info.name];
+            lock.unlock();
+
+            std::lock_guard<std::mutex> stream_lock(pcm_thread_ptr->stream_mutex);
+            pcm_thread_ptr->in_flight_cnt = -1; // reset to -1 for resume
+        }
+    } else {
+        std::unique_lock<std::mutex> stream_map_lock(pcm_stream_threads_mutex);
+        auto it = pcm_stream_threads_[gvm_id].find(fe_info.name);
+        if (it != pcm_stream_threads_[gvm_id].end()) {
+            auto pcm_thread_ptr = it->second;
+            auto pcm_pending_thread_ptr = pcm_pending_threads_[gvm_id][fe_info.name];
+            stream_map_lock.unlock();
+            /* flush msg queue first and push all msg into pending queue to avoid pcm_msg lost */
             {
-                std::unique_lock<std::mutex> stream_lock(pcm_stream_threads_[gvm_id][fe_info.name]->stream_mutex);
-                pcm_stream_threads_[gvm_id][fe_info.name]->stream_cond.wait(stream_lock,
-                                   [this,gvm_id=gvm_id,fe_name=fe_info.name]{
-                                   return pcm_stream_threads_[gvm_id][fe_name]->msg_queue.empty();
-                                   });
+                std::unique_lock<std::mutex> stream_lock(pcm_thread_ptr->stream_mutex);
+                /* cache the valid pcm_msg numbers as in_flight_cnt
+                 * pcm_msg comes after stop will be dropped in release
+                 */
+                pcm_thread_ptr->in_flight_cnt = pcm_thread_ptr->msg_queue.size();
+                /* wait in_flight_cnt reduce to 0 */
+                auto start = std::chrono::steady_clock::now();
+                bool pred_ret = pcm_thread_ptr->stream_ctrl_cond.wait_for(
+                                    stream_lock,
+                                    std::chrono::milliseconds(STOP_TIMEOUT_MS),
+                                    [this,gvm_id=gvm_id,fe_name=fe_info.name, pcm_thread_ptr]{
+                                    return (pcm_thread_ptr->in_flight_cnt == 0);
+                                    });
+                auto end = std::chrono::steady_clock::now();
+                auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+                if (elapsed >= std::chrono::milliseconds(STOP_TIMEOUT_MS))
+                {
+                    /* (1) pred_ret = 0 and elapsed >= STOP_TIMEOUT_MS: Need to debug why in_flight_cnt is not 0;
+                    *  (2) pred_ret = 1 and elapsed >= STOP_TIMEOUT_MS: Need to check if notification was received,
+                    * if notification was received, it's not a bug ignore it.
+                    */
+                    AWE_LOGE("%s STOP: in_flight_cnt is %d, elapsed %d ms, pred_ok %d",
+                        fe_info.name.c_str(), pcm_thread_ptr->in_flight_cnt, elapsed, pred_ret);
+                }
             }
 
-            pcm_stream_threads_[gvm_id][fe_info.name]->msg_queue.push(nullptr);
-            pcm_stream_threads_[gvm_id][fe_info.name]->stream_cond.notify_all();
-            if (pcm_stream_threads_[gvm_id][fe_info.name]->thread_obj.joinable())
-                pcm_stream_threads_[gvm_id][fe_info.name]->thread_obj.join();
+            {
+                std::unique_lock<std::mutex> pending_lock(pcm_pending_thread_ptr->stream_mutex);
+                /* pending queue needs to be fully clean up */
+                auto start = std::chrono::steady_clock::now();
+                bool pred_ret = pcm_pending_thread_ptr->stream_ctrl_cond.wait_for(
+                                    pending_lock,
+                                    std::chrono::milliseconds(STOP_TIMEOUT_MS),
+                                    [this,gvm_id=gvm_id,fe_name=fe_info.name, pcm_pending_thread_ptr]{
+                                    return pcm_pending_thread_ptr->msg_queue.empty();
+                                   });
+                auto end = std::chrono::steady_clock::now();
+                auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+                if (elapsed >= std::chrono::milliseconds(STOP_TIMEOUT_MS))
+                {
+                    /* (1) pred_ret = 0 and elapsed >= STOP_TIMEOUT_MS: Need to debug why msg_queue is not empty;
+                    *  (2) pred_ret = 1 and elapsed >= STOP_TIMEOUT_MS: Need to check if notification was received,
+                    * if notification was received, it's not a bug ignore it.
+                    */
+                    AWE_LOGE("%s STOP: msg_queue size is %d, elapsed %d ms, pred_ok %d",
+                        fe_info.name.c_str(), pcm_pending_thread_ptr->msg_queue.size(), elapsed, pred_ret);
+                }
+            }
+
+            ret = plugin_utils_[gvm_id].pcm_plugin->StreamStop(fe_info.name);
         }
-        ret = plugin_utils_[gvm_id].pcm_plugin->StreamStop(fe_info.name);
     }
 
-    if (!ret)
+    if (!ret) {
         buff.response.code = VIRTIO_SND_S_OK;
+        UpdatePcmDeviceState(gvm_id, buff.request.stream_id, buff.request.hdr.code);
+        {
+            std::unique_lock<std::mutex> lock(pcm_stream_threads_mutex);
+            if (pcm_stream_threads_[gvm_id].find(fe_info.name) != pcm_stream_threads_[gvm_id].end())
+                pcm_stream_threads_[gvm_id][fe_info.name]->stream_cond.notify_all();
+            if (pcm_pending_threads_[gvm_id].find(fe_info.name) != pcm_pending_threads_[gvm_id].end())
+                pcm_pending_threads_[gvm_id][fe_info.name]->stream_cond.notify_all();
+        }
+    }
     else
         buff.response.code = VIRTIO_SND_S_IO_ERR;
 
@@ -939,7 +1271,8 @@ void AudioDeviceManager::ProcessDCRead(struct virtio_snd_dc_read_msg &buff, unsi
     struct SoundCardMixerCtl ctl_info;
     struct CtlElemPayload elem_payload;
 
-    if (all_mixer_ctls_.find(gvm_id) == all_mixer_ctls_.end()) {
+    if (all_mixer_ctls_.find(gvm_id) == all_mixer_ctls_.end() ||
+        plugin_utils_[gvm_id].pcm_plugin == nullptr) {
         AWE_LOGE("ProcessDCRead failed to find mixer ctls for gvm id: %u", gvm_id);
         buff.response.code = VIRTIO_SND_S_IO_ERR;
         return;
@@ -952,7 +1285,7 @@ void AudioDeviceManager::ProcessDCRead(struct virtio_snd_dc_read_msg &buff, unsi
     elem_payload.name = ctl_info.id.name;
     elem_payload.control_id = buff.request.control_id;
     elem_payload.type = ctl_info.type;
-    elem_payload.access_control = bytes;
+    elem_payload.access_control = ACCESS_READWRITE;
 
     buff.response.code = VIRTIO_SND_S_OK;
 
@@ -1018,7 +1351,7 @@ void AudioDeviceManager::ProcessDCWrite(struct virtio_snd_dc_write_msg &buff, un
     elem_payload.name = ctl_info.id.name;
     elem_payload.control_id = buff.request.control_id;
     elem_payload.type = ctl_info.type;
-    elem_payload.access_control = bytes;
+    elem_payload.access_control = ACCESS_READWRITE;
 #if !defined(__QNX__)
 
     if((elem_payload.type == SNDRV_CTL_ELEM_TYPE_INTEGER)
@@ -1090,14 +1423,14 @@ void AudioDeviceManager::ProcessDCTlvRead(struct virtio_snd_dc_tlv_read_msg &buf
 
     ctl_info = all_mixer_ctls_[gvm_id][buff.request.control_id];
 
-    AWE_LOGI( "Reading TLV value for control %s", ctl_info.id.name);
+    AWE_LOGI( "Reading TLV value for control %s", ctl_info.id.name.c_str());
 
-    memset(&buff.tlv[0], 0, 1024);
+    memset(&buff.tlv[0], 0, MAX_TLV_SIZE);
 
     elem_payload.name = ctl_info.id.name;
     elem_payload.control_id = buff.request.control_id;
     elem_payload.type = ctl_info.type;
-    elem_payload.access_control = tlv_bytes;
+    elem_payload.access_control = ACCESS_TLV_READWRITE;
     elem_payload.value.tlv.tlv = (uint8_t*)&buff.tlv[0];
 
     ret = plugin_utils_[gvm_id].pcm_plugin->DcRead(elem_payload);
@@ -1148,7 +1481,7 @@ void AudioDeviceManager::ProcessDCTlvRead(struct virtio_snd_dc_tlv_read_msg &buf
     elem_payload.name = ctl_info.id.name;
     elem_payload.control_id = buff.request.control_id;
     elem_payload.type = ctl_info.type;
-    elem_payload.access_control = tlv_bytes;
+    elem_payload.access_control = ACCESS_TLV_READWRITE;
 
     memcpy(tlv_to_write, (unsigned char*)&buff + sizeof(struct virtio_snd_dc_hdr), tlv_size);
 
@@ -1188,6 +1521,7 @@ response:
     unsigned int gvm_id = sock_info.vmid;
     struct FrontendInfo fe_info;
     uint32_t ret = 0;
+    enum VirtioPCMState stream_state;
 
     AWE_LOGD("Enter");
 
@@ -1199,9 +1533,12 @@ response:
 
     fe_info = all_fe_dais_[gvm_id][args.stream_id];
 
-    if (pcm_stream_threads_[gvm_id].find(fe_info.name) == pcm_stream_threads_[gvm_id].end()) {
-        AWE_LOGE("ProcessPCMMsg failed to find fe dai name %s", fe_info.name.c_str());
-        return;
+    {
+        std::lock_guard<std::mutex> lock(pcm_stream_threads_mutex);
+        if (pcm_stream_threads_[gvm_id].find(fe_info.name) == pcm_stream_threads_[gvm_id].end()) {
+            AWE_LOGE("ProcessPCMMsg failed to find fe dai name %s", fe_info.name.c_str());
+            return;
+        }
     }
 
     pthread_setname_np(pthread_self(), "awe_adm_pcmmsg");
@@ -1231,85 +1568,296 @@ response:
 #endif  // ENABLE_RT_THREAD_PCMMSG
 
     while(1) {
-    {
-      std::unique_lock<std::mutex> stream_lock(pcm_stream_threads_[gvm_id][fe_info.name]->stream_mutex);
-      pcm_stream_threads_[gvm_id][fe_info.name]->stream_cond.wait(stream_lock,
-                         [this,gvm_id=gvm_id,fe_name=fe_info.name] {
-                         return !pcm_stream_threads_[gvm_id][fe_name]->msg_queue.empty();
-                         });
-
-      msg = pcm_stream_threads_[gvm_id][fe_info.name]->msg_queue.front();
-      pcm_stream_threads_[gvm_id][fe_info.name]->msg_queue.pop();
-
-      // NULL msg sent by destructor to terminate thread. Cleanup and exit
-      if (msg == NULL) {
-        AWE_LOGE("msg is NULL");
-        return;
-      }
-#ifdef OFF_TARGET_UNIT_TEST
-      return;
-#endif
-    }
-
-    if (dma_export_map_[gvm_id].find(fe_info.id) != dma_export_map_[gvm_id].end())
-    {
-        heap_fd = dma_export_map_[gvm_id][fe_info.id].fd;
-    }
-    else
-    {
-        ret = ihab_->Import(sock_info.vcid, (void**)&heap_fd, msg->desc.dma_bytes,
-                         msg->desc.export_id, HABMM_IMPORT_FLAGS_CACHED | HABMM_EXPIMP_FLAGS_FD);
-        if(ret) {
-          AWE_LOGE("Hab Import failed, skipping PCM operation");
-          goto response;
+        std::unique_lock<std::mutex> streams_map_lock(pcm_stream_threads_mutex);
+        auto it = pcm_stream_threads_[gvm_id].find(fe_info.name);
+        if (it == pcm_stream_threads_[gvm_id].end() || !it->second) {
+            AWE_LOGE("pcm_stream_threads_[%d][%s] is empty, fe thread is already deleted", gvm_id, fe_info.name.c_str());
+            return;
+        }
+        auto pcm_thread_ptr = it->second;
+        auto pit = pcm_pending_threads_[gvm_id].find(fe_info.name);
+        if (pit == pcm_pending_threads_[gvm_id].end() || !pit->second ) {
+            AWE_LOGE("pcm_pending_threads_[%d][%s] is empty, fe thread is already deleted", gvm_id, fe_info.name.c_str());
+            return;
+        }
+        auto pcm_pending_thread_ptr = pit->second;
+        // Pre-wait shutdown check
+        if (pcm_thread_ptr->stop_flag.load()) {
+            AWE_LOGI("Stop flag set for stream[%d][%s], exiting thread", gvm_id, fe_info.name.c_str());
+            return;
         }
 
-        dma_area_map.export_id = msg->desc.export_id;
-        dma_area_map.fd = heap_fd;
-        dma_area_map.vcid = sock_info.vcid;
-        dma_export_map_[gvm_id][fe_info.id] = dma_area_map;
-    }
+        streams_map_lock.unlock();
+        {
+            std::unique_lock<std::mutex> stream_lock(pcm_thread_ptr->stream_mutex);
 
-    pcm_buf_msg.offset = msg->desc.offset;
-    pcm_buf_msg.size = msg->length;
-    pcm_buf_msg.fe_dai_name = fe_info.name;
-    pcm_buf_msg.buff_fd = (uint64_t)heap_fd;
-    pcm_buf_msg.dma_bytes = msg->desc.dma_bytes;
-#if !defined(__QNX__)
-    if (direction == SNDRV_PCM_STREAM_PLAYBACK) {
-        ret = plugin_utils_[gvm_id].pcm_plugin->StreamWrite(pcm_buf_msg);
-    }
-    else {
-        ret = plugin_utils_[gvm_id].pcm_plugin->StreamRead(pcm_buf_msg);
+            /* wait until ANYONE of below
+             * 1. msg_queue is NOT empty && in_flight_cnt is NOT 0
+             * 2. device state is stopped || closed
+             */
+            pcm_thread_ptr->stream_cond.wait(stream_lock,
+                        [this,gvm_id=gvm_id,fe_name=fe_info.name,stream_id=args.stream_id, pcm_thread_ptr] {
+                        return pcm_thread_ptr->stop_flag.load() ||
+                                (((!pcm_thread_ptr->msg_queue.empty()) &&
+                                 (pcm_thread_ptr->in_flight_cnt != 0)) ||
+                                (GetPcmDeviceState(gvm_id, stream_id) == VIRTIO_PCM_STOPPED) ||
+                                (GetPcmDeviceState(gvm_id, stream_id) == VIRTIO_PCM_CLOSED));
+                        });
+            // Post-wait shutdown check
+            if (pcm_thread_ptr->stop_flag.load()) {
+                AWE_LOGI("Stop flag detected during wait for stream[%d][%s], exiting thread", gvm_id, fe_info.name.c_str());
+                return;
+            }
+            stream_state = GetPcmDeviceState(gvm_id, args.stream_id);
+            if (stream_state == VIRTIO_PCM_STOPPED ||
+                stream_state == VIRTIO_PCM_CLOSED) {
+                AWE_LOGE("exiting stream thread for stream %d", args.stream_id);
+                return;
+            }
 
-    }
-#else
-    if (direction == VIRTIO_STREAM_PLAYBACK) {
-        ret = plugin_utils_[gvm_id].pcm_plugin->StreamWrite(pcm_buf_msg);
-    }
-    else {
-        ret = plugin_utils_[gvm_id].pcm_plugin->StreamRead(pcm_buf_msg);
+            msg = pcm_thread_ptr->msg_queue.front();
+            if (msg == nullptr) {
+                AWE_LOGE("msg is null, ignore msg");
+                pcm_thread_ptr->msg_queue.pop();
+                continue;
+            }
 
-    }
+#ifdef OFF_TARGET_UNIT_TEST
+            return;
 #endif
-response:
-    if (!ret)
-        msg->status.status = VIRTIO_SND_S_OK;
-    else
-        msg->status.status = VIRTIO_SND_S_IO_ERR;
+        }
 
-    msg->length += sizeof(msg->status);
+        {
+            std::lock_guard<std::mutex> lock(dma_export_map_mutex);
+            if (dma_export_map_[gvm_id].find(fe_info.id) == dma_export_map_[gvm_id].end())
+            {
+                AWE_LOGE("Notice!!! Warning!!! dma_export_map_ is not ready for fe %s",
+                    fe_info.name.c_str());
+                ret = -1;
+                goto pending_handle;
+            }
+            heap_fd = dma_export_map_[gvm_id][fe_info.id].fd;
+        }
 
-    AWE_LOGD("Hab responding to virtio sound: ret %d", (uint32_t)ret);
-    ihab_->Send(sock_info.vcid, msg, sizeof(struct virtio_pcm_msg), 0);
-    free(msg);
+        pcm_buf_msg.offset = msg->desc.offset;
+        pcm_buf_msg.size = msg->length;
+        pcm_buf_msg.fe_dai_name = fe_info.name;
+        pcm_buf_msg.buff_fd = (uint64_t)heap_fd;
+        pcm_buf_msg.dma_bytes = msg->desc.dma_bytes;
+
+        if ((GetPcmDeviceState(gvm_id, args.stream_id) == VIRTIO_PCM_STARTED) ||
+            (GetPcmDeviceState(gvm_id, args.stream_id) == VIRTIO_PCM_PREPARED)) {
+#if !defined(__QNX__)
+            if (direction == SNDRV_PCM_STREAM_PLAYBACK) {
+                ret = plugin_utils_[gvm_id].pcm_plugin->StreamWrite(pcm_buf_msg);
+            } else {
+                ret = plugin_utils_[gvm_id].pcm_plugin->StreamRead(pcm_buf_msg);
+            }
+#else
+            if (direction == VIRTIO_STREAM_PLAYBACK) {
+                ret = plugin_utils_[gvm_id].pcm_plugin->StreamWrite(pcm_buf_msg);
+            } else {
+                ret = plugin_utils_[gvm_id].pcm_plugin->StreamRead(pcm_buf_msg);
+            }
+#endif
+        } else {
+            AWE_LOGE("Skip Write/Read msg since PCM is not in started or prepared state: fe_dai_name=%s",
+                    pcm_buf_msg.fe_dai_name.c_str());
+            ret = -1;
+        }
+
+pending_handle:
+        if (ret) {
+            /* error when RW index */
+            DropPcmMsg(sock_info.vcid, msg);
+        } else {
+            /* logically the corresponding pending thread is alive
+             * DO NOT hold global lock pcm_stream_threads_mutex for better performance
+             */
+            {
+                std::lock_guard<std::mutex> pending_lock(pcm_pending_thread_ptr->stream_mutex);
+                pcm_pending_thread_ptr->msg_queue.push(msg);
+            }
+            pcm_pending_thread_ptr->stream_cond.notify_one();
+        }
+
+        {
+            std::lock_guard<std::mutex> empty_lock(pcm_thread_ptr->stream_mutex);
+            pcm_thread_ptr->msg_queue.pop();
+            /* it's under stopping when in_flight_cnt >= 0
+             * no pcm_msg to be handled only remain in msg queue when in_flight_cnt == 0
+             */
+            if (pcm_thread_ptr->in_flight_cnt > 0) {
+                pcm_thread_ptr->in_flight_cnt--;
+            }
+            if (pcm_thread_ptr->in_flight_cnt == 0) {
+                pcm_thread_ptr->stream_ctrl_cond.notify_one();
+            }
+        }
+    }
+}
+
+void AudioDeviceManager::ProcessPCMPendingMsg(struct PCMMsgArgs args)
+{
+    uint64_t heap_fd = 0;
+    struct virtio_snd_pcm_buf_msg pcm_buf_msg;
+    struct DMAExport dma_area_map;
+    unsigned int direction = args.direction;
+    struct SocketInfo sock_info = args.sock_info;
+    struct virtio_pcm_msg *msg;
+    unsigned int gvm_id = sock_info.vmid;
+    struct FrontendInfo fe_info;
+    uint32_t ret = 0;
+    enum VirtioPCMState stream_state;
+
+    AWE_LOGD("Enter");
+
+    if (all_fe_dais_.find(gvm_id) == all_fe_dais_.end() ||
+        plugin_utils_[gvm_id].pcm_plugin == nullptr) {
+        AWE_LOGE("ProcessPCMMsg failed to find gvm id: %u", gvm_id);
+        return;
+    }
+
+    fe_info = all_fe_dais_[gvm_id][args.stream_id];
 
     {
-      std::lock_guard<std::mutex> empty_lock(pcm_stream_threads_[gvm_id][fe_info.name]->stream_mutex);
-      if (pcm_stream_threads_[gvm_id][fe_info.name]->msg_queue.empty())
-        pcm_stream_threads_[gvm_id][fe_info.name]->stream_cond.notify_one();
+        std::lock_guard<std::mutex> lock(pcm_stream_threads_mutex);
+        if (pcm_pending_threads_[gvm_id].find(fe_info.name) ==
+                        pcm_pending_threads_[gvm_id].end()) {
+            AWE_LOGE("ProcessPCMMsg failed to find fe dai name %s", fe_info.name.c_str());
+            return;
+        }
     }
-  }
+
+    pthread_setname_np(pthread_self(), "awe_adm_pendmsg");
+
+#ifdef ENABLE_RT_THREAD_PCMMSG
+
+    pthread_setname_np(pthread_self(), COMPRESMGR_CPU_THREAD_GRP_NAME);
+
+    struct sched_param pcmmsg_sched = {0};
+    CPUConfigReq_t cpu_config_req = {COMPRESMGR_CPU_COMPONENT_NAME, COMPRESMGR_CPU_THREAD_GRP_NAME};
+    CPUConfigResp_t cpu_config_resp = {0, 0, 0};
+    CompResmgrRet_e ret_get_cpu_config = CompResmgrGetCPUConfig(&cpu_config_req, &cpu_config_resp);
+    if (ret_get_cpu_config != COMPRESMGR_RET_SUCCESS) {
+        AUDIO_BASE_LOG(BASE_LOG_ERROR, MODULE_VIO_AUD_DEV, "CompResmgrGetCPUConfig failed, using default RT config");
+        cpu_config_resp.schedPolicy = RT_THREAD_PCMMSG_DEFAULT_POLICY;
+        cpu_config_resp.priority = RT_THREAD_PCMMSG_DEFAULT_PRIORITY;
+    }
+    pcmmsg_sched.sched_priority = cpu_config_resp.priority;
+
+    ret = pthread_setschedparam(pthread_self(), cpu_config_resp.schedPolicy, &pcmmsg_sched);
+    if (ret)
+        AUDIO_BASE_LOG(BASE_LOG_ERROR, MODULE_VIO_AUD_DEV, "pthread_setschedparam failed, fall back to TS thread");
+    else
+        AUDIO_BASE_LOG(BASE_LOG_INFO, MODULE_VIO_AUD_DEV, "Set RT thread %s with policy %d and priority %d succeeded",
+                       COMPRESMGR_CPU_THREAD_GRP_NAME, cpu_config_resp.schedPolicy, pcmmsg_sched.sched_priority);
+
+#endif  // ENABLE_RT_THREAD_PCMMSG
+
+    while(1)
+    {
+        std::unique_lock<std::mutex> streams_map_lock(pcm_stream_threads_mutex);
+        auto it = pcm_pending_threads_[gvm_id].find(fe_info.name);
+        if (it == pcm_pending_threads_[gvm_id].end() || !it->second ) {
+            AWE_LOGE("pcm_pending_threads_[%d][%s] is empty, fe thread is already deleted", gvm_id, fe_info.name.c_str());
+            return;
+        }
+        auto pcm_pending_thread_ptr = it->second;
+        // Pre-wait shutdown check
+        if (pcm_pending_thread_ptr->stop_flag.load()) {
+            AWE_LOGI("Stop flag set for stream[%d][%s], exiting thread", gvm_id, fe_info.name.c_str());
+            return;
+        }
+        streams_map_lock.unlock();
+        {
+            std::unique_lock<std::mutex> pending_lock(pcm_pending_thread_ptr->stream_mutex);
+
+            pcm_pending_thread_ptr->stream_cond.wait(pending_lock,
+                        [this,gvm_id=gvm_id,fe_name=fe_info.name,stream_id=args.stream_id, pcm_pending_thread_ptr] {
+                        return pcm_pending_thread_ptr->stop_flag.load() ||
+                                ((!pcm_pending_thread_ptr->msg_queue.empty()) ||
+                                (GetPcmDeviceState(gvm_id, stream_id) == VIRTIO_PCM_STOPPED) ||
+                                (GetPcmDeviceState(gvm_id, stream_id) == VIRTIO_PCM_CLOSED));
+                        });
+            // Post-wait shutdown check
+            if (pcm_pending_thread_ptr->stop_flag.load()) {
+                AWE_LOGI("Stop flag detected during wait for stream[%d][%s], exiting thread", gvm_id, fe_info.name.c_str());
+                return;
+            }
+            stream_state = GetPcmDeviceState(gvm_id, args.stream_id);
+            if (stream_state == VIRTIO_PCM_STOPPED ||
+                stream_state == VIRTIO_PCM_CLOSED) {
+                AWE_LOGE("exiting pending thread for stream %d", args.stream_id);
+                return;
+            }
+
+            msg = pcm_pending_thread_ptr->msg_queue.front();
+            if (msg == nullptr) {
+                AWE_LOGE("msg is null, ignore msg");
+                pcm_pending_thread_ptr->msg_queue.pop();
+                continue;
+            }
+
+#ifdef OFF_TARGET_UNIT_TEST
+            return;
+#endif
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(dma_export_map_mutex);
+            if (dma_export_map_[gvm_id].find(fe_info.id) == dma_export_map_[gvm_id].end())
+            {
+                AWE_LOGE("Notice!!! Warning!!! dma_export_map_ is not ready for fe %s", fe_info.name.c_str());
+                ret = -1;
+                goto skip;
+            }
+            heap_fd = dma_export_map_[gvm_id][fe_info.id].fd;
+        }
+
+        pcm_buf_msg.offset = msg->desc.offset;
+        pcm_buf_msg.size = msg->length;
+        pcm_buf_msg.fe_dai_name = fe_info.name;
+        pcm_buf_msg.buff_fd = (uint64_t)heap_fd;
+        pcm_buf_msg.dma_bytes = msg->desc.dma_bytes;
+
+        if ((GetPcmDeviceState(gvm_id, args.stream_id) == VIRTIO_PCM_STARTED) ||
+            (GetPcmDeviceState(gvm_id, args.stream_id) == VIRTIO_PCM_PREPARED)) {
+#if !defined(__QNX__)
+            if (direction == SNDRV_PCM_STREAM_PLAYBACK) {
+                ret = plugin_utils_[gvm_id].pcm_plugin->StreamWriteDone(pcm_buf_msg);
+            }
+#else
+            if (direction == VIRTIO_STREAM_PLAYBACK) {
+                ret = plugin_utils_[gvm_id].pcm_plugin->StreamWriteDone(pcm_buf_msg);
+            }
+#endif
+        } else {
+            AWE_LOGE("Skip Write/Read msg since PCM is not in started or prepared state: fe_dai_name=%s",
+                        pcm_buf_msg.fe_dai_name.c_str());
+            ret = -1;
+        }
+
+skip:
+        if (!ret)
+            msg->status.status = VIRTIO_SND_S_OK;
+        else
+            msg->status.status = VIRTIO_SND_S_IO_ERR;
+
+        msg->length += sizeof(msg->status);
+
+        AWE_LOGD("Hab responding to virtio sound: ret %d", (uint32_t)ret);
+        ihab_->Send(sock_info.vcid, msg, sizeof(struct virtio_pcm_msg), 0);
+        free(msg);
+
+        {
+            std::lock_guard<std::mutex> empty_lock(pcm_pending_thread_ptr->stream_mutex);
+            pcm_pending_thread_ptr->msg_queue.pop();
+            if (pcm_pending_thread_ptr->msg_queue.empty()) {
+                pcm_pending_thread_ptr->stream_ctrl_cond.notify_one();
+            }
+        }
+    }
 }
 
 void AudioDeviceManager::ProcessShmemMap(struct virtio_snd_dc_write_msg &buff, struct SocketInfo sock_info)
@@ -1334,7 +1882,7 @@ void AudioDeviceManager::ProcessShmemMap(struct virtio_snd_dc_write_msg &buff, s
     elem_payload.name = ctl_info.id.name;
     elem_payload.control_id = buff.request.control_id;
     elem_payload.type = ctl_info.type;
-    elem_payload.access_control = bytes;
+    elem_payload.access_control = ACCESS_READWRITE;
 #if !defined(__QNX__)
     memcpy(&elem_payload.value.bytes.data, &buff.request_ext.value.bytes.data,
         sizeof(elem_payload.value.bytes.data));
@@ -1393,7 +1941,7 @@ void AudioDeviceManager::ProcessShmemUnmap(struct virtio_snd_dc_write_msg &buff,
     elem_payload.name = ctl_info.id.name;
     elem_payload.control_id = buff.request.control_id;
     elem_payload.type = ctl_info.type;
-    elem_payload.access_control = bytes;
+    elem_payload.access_control = ACCESS_READWRITE;
 #if !defined(__QNX__)
     memcpy(&elem_payload.value.bytes.data, &buff.request_ext.value.bytes.data,
         sizeof(elem_payload.value.bytes.data));

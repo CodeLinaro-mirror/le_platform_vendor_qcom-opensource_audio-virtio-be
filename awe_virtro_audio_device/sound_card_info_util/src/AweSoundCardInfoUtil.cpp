@@ -25,7 +25,7 @@ static uint32_t getSndCtlElemValueCount(uint32_t ctl_type, uint32_t ctl_access)
         limit_count = sizeof(snd_ctl_elem_value().value.enumerated.item) / sizeof(unsigned int);
     } else if (ctl_type == SNDRV_CTL_ELEM_TYPE_BYTES) {
         if (ctl_access & tlv_mask)
-            limit_count = 1024;
+            limit_count = MAX_TLV_SIZE;
         else
             limit_count = sizeof(snd_ctl_elem_value().value.bytes.data) / sizeof(unsigned char);
     }
@@ -41,7 +41,7 @@ static uint32_t getSndCtlElemValueCount(uint32_t ctl_type, uint32_t ctl_access)
         limit_count = VIRTIO_CTL_ELEM_VALUE_ENUMERATED_ITEM_SIZE / sizeof(unsigned int);
     } else if (ctl_type == VIRTIO_MIXER_CTL_TYPE_MASK_BYTES) {
         if (ctl_access & tlv_mask)
-            limit_count = 1024;
+            limit_count = MAX_TLV_SIZE;
         else
             limit_count = VIRTIO_CTL_ELEM_VALUE_BYTES_DATA_SIZE / sizeof(unsigned char);
     }
@@ -331,8 +331,8 @@ void AweSoundCardInfoUtil::AddStaticMixerCtls()
             SNDRV_CTL_ELEM_TYPE_BYTES,
             AWE_CONTROL_TYPE_BYTE,
             STATIC_CONTROL_DSP,
-            SNDRV_CTL_ELEM_ACCESS_READWRITE,
-            getSndCtlElemValueCount(AWE_CONTROL_TYPE_BYTE, SNDRV_CTL_ELEM_ACCESS_READWRITE),
+            SNDRV_CTL_ELEM_ACCESS_TLV_READ | SNDRV_CTL_ELEM_ACCESS_TLV_WRITE,
+            getSndCtlElemValueCount(AWE_CONTROL_TYPE_BYTE, SNDRV_CTL_ELEM_ACCESS_TLV_READ | SNDRV_CTL_ELEM_ACCESS_TLV_WRITE),
         },
         {
             {"AWE getParam", 0, SNDRV_CTL_ELEM_IFACE_MIXER},
@@ -340,8 +340,8 @@ void AweSoundCardInfoUtil::AddStaticMixerCtls()
             SNDRV_CTL_ELEM_TYPE_BYTES,
             AWE_CONTROL_TYPE_BYTE,
             STATIC_CONTROL_DSP,
-            SNDRV_CTL_ELEM_ACCESS_READWRITE,
-            getSndCtlElemValueCount(AWE_CONTROL_TYPE_BYTE, SNDRV_CTL_ELEM_ACCESS_READWRITE),
+            SNDRV_CTL_ELEM_ACCESS_TLV_READ | SNDRV_CTL_ELEM_ACCESS_TLV_WRITE,
+            getSndCtlElemValueCount(AWE_CONTROL_TYPE_BYTE, SNDRV_CTL_ELEM_ACCESS_TLV_READ | SNDRV_CTL_ELEM_ACCESS_TLV_WRITE),
         },
         {
             {"ShmemMap", 0, SNDRV_CTL_ELEM_IFACE_MIXER},
@@ -388,27 +388,18 @@ void AweSoundCardInfoUtil::AddStaticMixerCtls()
             SNDRV_CTL_ELEM_ACCESS_READWRITE,
             getSndCtlElemValueCount(AWE_CONTROL_TYPE_BYTE, SNDRV_CTL_ELEM_ACCESS_READWRITE),
         },
+        {
+            {"AWE getTimestamp", 0, SNDRV_CTL_ELEM_IFACE_MIXER},
+            kNone,
+            SNDRV_CTL_ELEM_TYPE_BYTES,
+            AWE_CONTROL_TYPE_BYTE,
+            STATIC_CONTROL_DSP,
+            SNDRV_CTL_ELEM_ACCESS_READWRITE,
+            8,
+        },
     };
 #else
     SoundCardMixerCtl staticMixerCtrls[] = {
-        {
-            {"AWE setParam", 0, VIRTIO_CTL_ID_IFACE_MIXER},
-            kNone,
-            VIRTIO_MIXER_CTL_TYPE_MASK_BYTES,
-            AWE_CONTROL_TYPE_BYTE,
-            STATIC_CONTROL_DSP,
-            VIRTIO_MIXER_CTL_ACCESS_MASK_READWRITE,
-            getSndCtlElemValueCount(AWE_CONTROL_TYPE_BYTE, VIRTIO_MIXER_CTL_ACCESS_MASK_READWRITE),
-        },
-        {
-            {"AWE getParam", 0, VIRTIO_CTL_ID_IFACE_MIXER},
-            kNone,
-            VIRTIO_MIXER_CTL_TYPE_MASK_BYTES,
-            AWE_CONTROL_TYPE_BYTE,
-            STATIC_CONTROL_DSP,
-            VIRTIO_MIXER_CTL_ACCESS_MASK_READWRITE,
-            getSndCtlElemValueCount(AWE_CONTROL_TYPE_BYTE, VIRTIO_MIXER_CTL_ACCESS_MASK_READWRITE),
-        },
         {
             {"ShmemMap", 0, VIRTIO_CTL_ID_IFACE_MIXER},
             kNone,
@@ -444,6 +435,15 @@ void AweSoundCardInfoUtil::AddStaticMixerCtls()
             STATIC_CONTROL_NODSP,
             VIRTIO_MIXER_CTL_ACCESS_MASK_READ | VIRTIO_MIXER_CTL_ACCESS_MASK_WRITE,
             1,
+        },
+        {
+            {"AWE getTimestamp", 0, VIRTIO_CTL_ID_IFACE_MIXER},
+            kNone,
+            VIRTIO_MIXER_CTL_TYPE_MASK_BYTES,
+            AWE_CONTROL_TYPE_BYTE,
+            STATIC_CONTROL_DSP,
+            VIRTIO_MIXER_CTL_ACCESS_MASK_READ | VIRTIO_MIXER_CTL_ACCESS_MASK_WRITE,
+            8,
         },
     };
 #endif
@@ -588,7 +588,7 @@ uint32_t AweSoundCardInfoUtil::AddAweMixCtl(const awe_control_t *awe_ctl)
         }
     } else {
         newCtl.type = VIRTIO_MIXER_CTL_TYPE_MASK_BYTES;
-        newCtl.access = VIRTIO_MIXER_CTL_ACCESS_MASK_READWRITE;
+        newCtl.access = VIRTIO_MIXER_CTL_ACCESS_MASK_TLV_READWRITE;
         newCtl.count = newCtl.count * sizeof(uint32_t) + 2 * sizeof(uint32_t);//allocate extra for count, offset and do_set.
     }
 #endif
@@ -640,8 +640,8 @@ uint32_t AweSoundCardInfoUtil::AddAweEventCtl(const awe_event_t *awe_event)
     newCtl.awe_ctl_type = AWE_CONTROL_TYPE_BYTE;
     newCtl.type = VIRTIO_MIXER_CTL_TYPE_MASK_BYTES;
     newCtl.ctrl_mode = EVENT_CONTROL;
-    newCtl.access = VIRTIO_MIXER_CTL_ACCESS_MASK_READWRITE;
-    newCtl.count = getSndCtlElemValueCount(AWE_CONTROL_TYPE_BYTE, VIRTIO_MIXER_CTL_ACCESS_MASK_READWRITE);
+    newCtl.access = VIRTIO_MIXER_CTL_ACCESS_MASK_TLV_READWRITE;
+    newCtl.count = getSndCtlElemValueCount(AWE_CONTROL_TYPE_BYTE, VIRTIO_MIXER_CTL_ACCESS_MASK_TLV_READWRITE);
 #endif
 
     all_mixer_ctrls_.push_back(newCtl);

@@ -39,6 +39,11 @@
 #define __VIRTIO_SND_H__
 
 #define VIRTIO_SND_DC_NAME_MAXLEN   64
+#define MAX_HAB_BUFFER_SIZE 4096
+#define HAB_HEADER_SIZE (sizeof(struct virtio_snd_dc_hdr) + sizeof(virtio_snd_hdr))
+#define AWE_TLV_HEADER_SIZE (2 * sizeof(uint32_t))
+#define MAX_TLV_SIZE (MAX_HAB_BUFFER_SIZE - HAB_HEADER_SIZE - AWE_TLV_HEADER_SIZE)
+
 #if !defined(__QNX__)
 #include "sound/asound.h"
 #else
@@ -126,6 +131,8 @@ enum {
 
   VIRTIO_SND_R_SHMEM_MAP,
   VIRTIO_SND_R_SHMEM_UNMAP,
+
+  VIRTIO_SND_R_VERSION,
 };
 
 /* supported PCM stream features */
@@ -334,6 +341,9 @@ struct virtio_snd_pcm_set_params {
  __u8 rate;
 
  __u8 is_mmap_noirq;
+
+ __u32 export_id;
+ __u32 dma_bytes;
 };
 
 struct virtio_snd_pcm_set_params_msg {
@@ -418,5 +428,16 @@ struct virtio_snd_dc_event {
     uint16_t control_id;
     uint16_t mask;
 };
+
+enum {
+    VSND_VERSION_1 = 0,    //Import memory in 1st write/ready, DEPRECATED
+    VSND_VERSION_2,        // Import memory in SetParam
+};
+
+struct virtio_snd_version_msg {
+   struct virtio_snd_hdr request;
+   struct virtio_snd_hdr response;
+   __u32 version;
+} __attribute__((packed));
 
 #endif
