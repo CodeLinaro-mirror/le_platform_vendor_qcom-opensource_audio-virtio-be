@@ -12,23 +12,29 @@ set(CMAKE_CXX_STANDARD 14)
 add_compile_options(-Werror)
 
 # Let SCIU stand for SoundCardInfoUtil
-set(SCIU_PROJECT_NAME
+set(AWESCIU_PROJECT_NAME
     AweSoundCardInfoUtil
 )
-set(SCIU_SOURCE_DIR
-    src
+
+set(AWESCIU_DIR
+    ${CMAKE_CURRENT_LIST_DIR}
 )
-set(SCIU_SOURCE
-    ${SCIU_SOURCE_DIR}/AweSoundCardInfoUtil.cpp
+
+
+set(AWESCIU_SOURCE_DIR
+    ${AWESCIU_DIR}/src
 )
-set(SCIU_HEADERS_DIR
-    inc/
+set(AWESCIU_SOURCE
+    ${AWESCIU_SOURCE_DIR}/AweSoundCardInfoUtil.cpp
 )
-set(SCIU_HEADERS
-    ${SCIU_HEADERS_DIR}/ISoundCardInfoUtil.h
-    ${SCIU_HEADERS_DIR}/AweSoundCardInfoUtil.h
-    ${SCIU_HEADERS_DIR}/SoundCardInfoTypes.h
-    ${SCIU_HEADERS_DIR}/virtio_snd.h
+
+set(AWESCIU_HEADERS_DIR
+    ${AWESCIU_DIR}/inc/
+)
+
+
+set(AWESCIU_HEADERS
+    ${AWESCIU_HEADERS_DIR}/AweSoundCardInfoUtil.h
 )
 
 #add_definitions(-DAWE_MANAGER_ENABLE)
@@ -41,16 +47,16 @@ find_package(Threads)
 ################################################################################
 # Project dependencies
 ################################################################################
-add_library(${SCIU_PROJECT_NAME} SHARED
-    ${SCIU_SOURCE} 
-    ${SCIU_HEADERS}
+add_library(${AWESCIU_PROJECT_NAME} SHARED
+    ${AWESCIU_SOURCE} 
+    ${AWESCIU_HEADERS}
 )
 
 include_directories(
-    ${SCIU_HEADERS_DIR}
+    ${AWESCIU_HEADERS_DIR}
 )
 
-target_link_libraries(${SCIU_PROJECT_NAME} PUBLIC awe_controller awe_utils)
+target_link_libraries(${AWESCIU_PROJECT_NAME} PUBLIC awe_controller awe_utils)
 
-install(TARGETS ${SCIU_PROJECT_NAME} LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}")
-install(DIRECTORY ${SCIU_HEADERS_DIR} DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")
+install(TARGETS ${AWESCIU_PROJECT_NAME} LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}")
+install(DIRECTORY ${AWESCIU_HEADERS_DIR}  DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/")

@@ -33,8 +33,6 @@
  * SPDX-License-Identifier: BSD-3-Clause-Clear
  */
 
-
-
 #ifndef __VIRTIO_SND_H__
 #define __VIRTIO_SND_H__
 

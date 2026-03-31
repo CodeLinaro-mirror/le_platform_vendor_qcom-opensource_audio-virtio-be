@@ -3,12 +3,10 @@
  * SPDX-License-Identifier: BSD-3-Clause-Clear
  */
 
-#include "AweSoundCardInfoUtil.h"
-#include "AweAudioPlugin.h"
+#include "audio_plugin_interface.h"
+#include "ISoundCardInfoUtil.h"
 #include "hab_interface.h"
 #include "virtio_snd.h"
-#include "awe_log_util.h"
-
 #include <vector>
 #include <unordered_map>
 #include <functional>
@@ -19,13 +17,20 @@
 #include <queue>
 #include <memory>
 #include <atomic>
-
-#define AWE_LOGE(...) AUDIO_BASE_LOG(BASE_LOG_ERROR, MODULE_VIO_AUD_DEV, __VA_ARGS__)
-#define AWE_LOGI(...) AUDIO_BASE_LOG(BASE_LOG_INFO, MODULE_VIO_AUD_DEV, __VA_ARGS__)
-#define AWE_LOGD(...) AUDIO_BASE_LOG(BASE_LOG_DEBUG, MODULE_VIO_AUD_DEV, __VA_ARGS__)
+#include "audio_log_util.h"
 
 #define DEFAULT_QUEUE_BITMAP ((1 << 0) | (1 << 1) | (1 << 2) | (1 << 3))
+#define MAX_PROCESSOR_CORES 4
 
+// ADM Service Type Enumeration
+typedef enum {
+    ADM_TYPE_UNINITIALIZED = -1,
+    ADM_TYPE_AWE = 0,
+    ADM_TYPE_AR = 1
+} ADMServiceType;
+
+// Global variable declaration
+extern ADMServiceType g_adm_service_type;
 struct PluginUtils {
     ISoundCardInfoUtil *sciu;
     IAudioPlugin *pcm_plugin;
@@ -35,6 +40,11 @@ struct PCMMsgArgs {
     uint32_t stream_id;
     struct SocketInfo sock_info;
     unsigned int direction;
+};
+
+struct PCMMsgComplt {
+    int32_t vcid;
+    unordered_map<uint32_t, struct virtio_pcm_msg*> pcm_msg_map;
 };
 
 struct PCMStreamThread {
@@ -49,6 +59,7 @@ struct PCMStreamThread {
      * >0 - stop and indicate the count of msgs to be handled
      */
     int32_t in_flight_cnt;
+    struct PCMMsgComplt pcm_msg_complt;
     std::atomic<bool> stop_flag{false};
 
 
@@ -82,8 +93,8 @@ struct ShmemInfo {
     uint32_t data_fd;
     uint32_t export_fd;
     uint32_t data_size;
-    uint32_t addr_lsw[AWE_MAX_PROCESSOR_CORES];
-    uint32_t addr_msw[AWE_MAX_PROCESSOR_CORES];
+    uint32_t addr_lsw[MAX_PROCESSOR_CORES];
+    uint32_t addr_msw[MAX_PROCESSOR_CORES];
 };
 
 class AudioDeviceManager {
@@ -134,8 +145,10 @@ class AudioDeviceManager {
         void SSRCallbackFunc(struct SocketInfo sock_info, enum SSRState);
         void EventCallbackFunc(struct SocketInfo sock_info, uint32_t control_id);
 #endif
+        // Callback function to handle pcm msg complete event
+        void PcmMsgCompleteCallbackFunc(string &fe_dai_name, uint32_t msg_offset);
         void ProcessPCMMsg(struct PCMMsgArgs args);
-        void ProcessPCMPendingMsg(struct PCMMsgArgs args);
+        //void ProcessPCMPendingMsg(struct PCMMsgArgs args);
         std::unordered_map<int32_t, struct PluginUtils> plugin_utils_;
 
         std::unordered_map<int32_t, std::vector<FrontendInfo>> all_fe_dais_;
@@ -144,7 +157,7 @@ class AudioDeviceManager {
         std::unordered_map<int32_t, std::unordered_map<int32_t, struct DMAExport>> dma_export_map_;
         std::unordered_map<int32_t, std::unordered_map<int32_t, struct PushPullInfo>> push_pull_map_;
         std::unordered_map<int32_t, std::unordered_map<string, std::shared_ptr<PCMStreamThread>>> pcm_stream_threads_;
-        std::unordered_map<int32_t, std::unordered_map<string, std::shared_ptr<PCMStreamThread>>> pcm_pending_threads_;
+        //std::unordered_map<int32_t, std::unordered_map<string, std::shared_ptr<PCMStreamThread>>> pcm_pending_threads_;
         std::unordered_map<int32_t, std::unordered_map<uint32_t, uint32_t>> vcid_map_;
 
     private:

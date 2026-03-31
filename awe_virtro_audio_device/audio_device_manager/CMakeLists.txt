@@ -3,7 +3,7 @@
 ################################################################################
 cmake_minimum_required(VERSION 3.5)
 # GoogleTest requires at least C++14
-set(CMAKE_CXX_STANDARD 14)
+set(CMAKE_CXX_STANDARD 17)
 
 ################################################################################
 # Helpful 'set'
@@ -11,9 +11,9 @@ set(CMAKE_CXX_STANDARD 14)
 add_compile_options(-Werror)
 
 # Let APIF stand for audio_plugin_intf
-set(ADM_PROJECT_NAME
-    AweDeviceManager
-)
+    set(ADM_PROJECT_NAME
+        AudioDeviceManager
+    )
 
 # ADM src and inc files
 set(ADM_SOURCE_DIR
@@ -51,13 +51,14 @@ set(ADM_SOCKET_INTF_HEADERS
 if ("${ENABLE_TARGET}" STREQUAL "sa8797")
     add_definitions(-DENABLE_RT_THREAD_PCMMSG)
     add_definitions(-DCOMPRESMGR_CPU_COMPONENT_NAME="audio")
-    add_definitions(-DCOMPRESMGR_CPU_THREAD_GRP_NAME="awe_adm_pcmmsg")
+    add_definitions(-DCOMPRESMGR_CPU_THREAD_GRP_NAME="adm_pcmmsg")
 endif()
 
 ################################################################################
 # Project meta
 ################################################################################
-project(AweDeviceManager)
+##
+project(AudioDeviceManager)
 find_package(Threads)
 
 ################################################################################
@@ -73,6 +74,7 @@ ${ADM_SOCKET_INTF_HEADERS}
 # add_executable(${ADM_PROJECT_NAME} ${ADM_SOURCE} ${ADM_SOCKET_INTF_SOURCE})
 
 include_directories(${ADM_HEADERS_DIR} ${ADM_SOCKET_INTF_HEADERS_DIR})
+
 target_link_libraries(${ADM_PROJECT_NAME} PRIVATE AweAudioPluginIntf AweSoundCardInfoUtil)
 target_link_libraries(${ADM_PROJECT_NAME} PRIVATE awe_utils)
 target_link_libraries(${ADM_PROJECT_NAME} PRIVATE pthread glib-2.0 cutils)
@@ -80,6 +82,16 @@ target_link_libraries(${ADM_PROJECT_NAME} PRIVATE uhab)
 if ("${ENABLE_TARGET}" STREQUAL "sa8797")
     target_link_libraries(${ADM_PROJECT_NAME} PRIVATE compresmgr_client)
 endif()
+target_link_libraries(${ADM_PROJECT_NAME} PRIVATE ArAudioPluginIntf ArSoundCardInfoUtil)
+target_link_libraries(${ADM_PROJECT_NAME} PRIVATE pthread uhab audio_log_util)
+target_link_libraries(${ADM_PROJECT_NAME} PRIVATE glib-2.0 cutils)
+option(ENABLE_COVERAGE "Enable code coverage reporting" OFF)
+# Define an option to enable/disable code coverage during compilation
+if(ENABLE_COVERAGE)
+    target_compile_options(${ADM_PROJECT_NAME} PRIVATE -g -O0 --coverage)
+    target_link_options(${ADM_PROJECT_NAME} PRIVATE --coverage)
+endif()
+
 
 # Define an option to enable/disable code coverage during compilation
 # by default this flag is set to off

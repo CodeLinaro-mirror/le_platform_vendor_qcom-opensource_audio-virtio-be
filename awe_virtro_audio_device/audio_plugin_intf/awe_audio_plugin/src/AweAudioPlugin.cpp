@@ -21,6 +21,13 @@
     clock_nanosleep(CLOCK_MONOTONIC, 0, &ts, NULL);\
 } while (0)
 
+/******************************************************************************/
+/*********************************** MACROS ***********************************/
+/******************************************************************************/
+#define AWE_LOGE(...) AUDIO_BASE_LOG(BASE_LOG_ERROR, MODULE_VIO_AUD_DEV, __VA_ARGS__)
+#define AWE_LOGI(...) AUDIO_BASE_LOG(BASE_LOG_INFO, MODULE_VIO_AUD_DEV, __VA_ARGS__)
+#define AWE_LOGD(...) AUDIO_BASE_LOG(BASE_LOG_DEBUG, MODULE_VIO_AUD_DEV, __VA_ARGS__)
+
 // defines for raw control(DSPC tunning command)
 #define MAX_POLL_CNT (5)
 #define PFID_SET_VALUE_SET_CALL 60
@@ -217,7 +224,7 @@ STATIC_FUNC void AweEventCallbackFunc(const awemgr_event *ev, void *client_data)
             AWE_LOGE("AweCtrl structure not found for event control %s", ev->module.name);
             return;
         }
-        struct GVMEventCallbackParams *eventTLV = (struct GVMEventCallbackParams*)AweCtrl->elem_payload.value.tlv.tlv;
+        struct GVMEventCallbackParams *eventTLV = (struct GVMEventCallbackParams*)AweCtrl->elem_payload.value.tlv_data.tlv;
         eventTLV->source_module_id = objectId;
         eventTLV->event_id = eventType;
         eventTLV->param_size = ev->sizeInBytes;
@@ -276,7 +283,7 @@ AweCtrlValue* AweAudioPlugin::GetAweCtrlFromName(const char *ctrl_name)
  *     - For ACCESS_READWRITE (plain BYTES), value.bytes.data[] is treated
  *       as a full control payload and written from offset = 0 for
  *       elem_count.
- *     - For ACCESS_TLV_READWRITE (TLV BYTES), value.tlv.tlv[] is interpreted
+ *     - For ACCESS_TLV_READWRITE (TLV BYTES), value.tlv_data.tlv[] is interpreted
  *       as an AweCtrlVectorValue_t, which provides offset, count, do_set and
  *       the data slice to be written.
  *
@@ -316,11 +323,11 @@ uint32_t AweAudioPlugin::AweSetNamedControl(AweCtrlValue *AweCtrl, const CtlElem
 
     if (ctl_elem_payload.access_control == ACCESS_TLV_READWRITE) {
         // ACCESS_TLV_READWRITE
-        AweCtrlVectorValue_t *plugin_ctl_data = (AweCtrlVectorValue_t *)&ctl_elem_payload.value.tlv.tlv[0];
+        AweCtrlVectorValue_t *plugin_ctl_data = (AweCtrlVectorValue_t *)&ctl_elem_payload.value.tlv_data.tlv[0];
 
         if (plugin_ctl_data->do_set == 0) {
             // do_set = 0, stored offset and count into AweCtrl
-            AweCtrlVectorValue_t *AweCtrldata = (AweCtrlVectorValue_t *)&AweCtrl->elem_payload.value.tlv.tlv[0];
+            AweCtrlVectorValue_t *AweCtrldata = (AweCtrlVectorValue_t *)&AweCtrl->elem_payload.value.tlv_data.tlv[0];
             AweCtrldata->count = plugin_ctl_data->count;   // in elements
             AweCtrldata->offset = plugin_ctl_data->offset;
             AweCtrldata->do_set = 0;
@@ -446,7 +453,7 @@ exit:
  * @param[in] ctl_elem_payload
  *     ALSA-style control descriptor describing which named control to read
  *     (name/numid/type/access_control/elem_count, etc.). For TLV controls,
- *     ctl_elem_payload.value.tlv.tlv[] carries the TLV buffer interpreted as
+ *     ctl_elem_payload.value.tlv_data.tlv[] carries the TLV buffer interpreted as
  *     AweCtrlVectorValue_t (offset/count, etc.).
  *
  * @param[in] type
@@ -461,8 +468,8 @@ uint32_t AweAudioPlugin::AweGetNamedControl(AweCtrlValue *AweCtrl, const CtlElem
     uint32_t ret = AWE_EOK;
     awe_named_control_param_t *ctrl_param = NULL;
     uint32_t payload_sz = 0;
-    AweCtrlVectorValue_t *plugin_ctl_data = (AweCtrlVectorValue_t *)&ctl_elem_payload.value.tlv.tlv[0];
-    AweCtrlVectorValue_t *AweCtrldata = (AweCtrlVectorValue_t *)&AweCtrl->elem_payload.value.tlv.tlv[0];
+    AweCtrlVectorValue_t *plugin_ctl_data = (AweCtrlVectorValue_t *)&ctl_elem_payload.value.tlv_data.tlv[0];
+    AweCtrlVectorValue_t *AweCtrldata = (AweCtrlVectorValue_t *)&AweCtrl->elem_payload.value.tlv_data.tlv[0];
 
     // NOTE on elem_count semantics:
     //
@@ -742,9 +749,9 @@ uint32_t AweAudioPlugin::AweSetRawParam
 #ifndef __QNX__
     uint32_t command_buf_len = 0;
     AweRawCtrlVectorValue_t * plugin_ctl_data =
-        (AweRawCtrlVectorValue_t *)&ctl_elem_payload.value.tlv.tlv[0];
+        (AweRawCtrlVectorValue_t *)&ctl_elem_payload.value.tlv_data.tlv[0];
     AweRawCtrlVectorValue_t * AweCtrldata =
-        (AweRawCtrlVectorValue_t *)&AweCtrl->elem_payload.value.tlv.tlv[0];
+        (AweRawCtrlVectorValue_t *)&AweCtrl->elem_payload.value.tlv_data.tlv[0];
     switch (type) {
         case RAW_PARAM_SET: {
             if (IS_OEM_TUNNEL_SET(plugin_ctl_data->flag)){
@@ -824,9 +831,9 @@ uint32_t AweAudioPlugin::AweGetRawParam
     uint32_t command_buf_len = 0;
     AweRawCtrlVectorValue_t * ctrl_param = NULL;
     AweRawCtrlVectorValue_t * plugin_ctl_data =
-        (AweRawCtrlVectorValue_t *)&ctl_elem_payload.value.tlv.tlv[0];
+        (AweRawCtrlVectorValue_t *)&ctl_elem_payload.value.tlv_data.tlv[0];
     AweRawCtrlVectorValue_t * AweCtrldata =
-        (AweRawCtrlVectorValue_t *)&AweCtrl->elem_payload.value.tlv.tlv[0];
+        (AweRawCtrlVectorValue_t *)&AweCtrl->elem_payload.value.tlv_data.tlv[0];
 
     AWE_LOGD("enter %d AweCtrl->elem_count %d!!", ctl_elem_payload.access_control,
         AweCtrl->elem_count);
@@ -1076,7 +1083,7 @@ uint32_t AweAudioPlugin::DcWrite(const CtlElemPayload &ctl_elem_payload)
             break;
         }
         case EVENT_CONTROL: {
-            int isRegister = ctl_elem_payload.value.tlv.tlv[0];
+            int isRegister = ctl_elem_payload.value.tlv_data.tlv[0];
             struct awe_event_reg_cfg event_sub = {0};
 
             AWE_LOGD("Event type mixer control command %s, value %d", ctl_elem_payload.name.c_str(), isRegister);
@@ -1224,14 +1231,14 @@ int AweAudioPlugin::DcRead(struct CtlElemPayload &ctl_elem_payload)
              * so that we don't have to run if-else statements here based on the control type.
              */
             if (mixCtl->ctrl_mode == EVENT_CONTROL) {
-                memcpy(ctl_elem_payload.value.tlv.tlv, AweCtrl->elem_payload.value.tlv.tlv, AweCtrl->elem_count);
+                memcpy(ctl_elem_payload.value.tlv_data.tlv, AweCtrl->elem_payload.value.tlv_data.tlv, AweCtrl->elem_count);
                 for(int i=0; i<AweCtrl->elem_count; i++)
-                    AWE_LOGD("DcRead tlv bytes data[%d]: 0x%x", i, AweCtrl->elem_payload.value.tlv.tlv[i]);
+                    AWE_LOGD("DcRead tlv bytes data[%d]: 0x%x", i, AweCtrl->elem_payload.value.tlv_data.tlv[i]);
             } else if (mixCtl->ctrl_mode == NAMED_CONTROL) {
-                AweCtrlVectorValue_t * AweCtrldata = (AweCtrlVectorValue_t *)&AweCtrl->elem_payload.value.tlv.tlv[0];
-                memcpy(ctl_elem_payload.value.tlv.tlv, AweCtrldata, AweCtrldata->count * sizeof(uint32_t) + sizeof(AweCtrlVectorValue_t));
+                AweCtrlVectorValue_t * AweCtrldata = (AweCtrlVectorValue_t *)&AweCtrl->elem_payload.value.tlv_data.tlv[0];
+                memcpy(ctl_elem_payload.value.tlv_data.tlv, AweCtrldata, AweCtrldata->count * sizeof(uint32_t) + sizeof(AweCtrlVectorValue_t));
                 for(int i=0; i<(AweCtrldata->count * sizeof(uint32_t) + sizeof(AweCtrlVectorValue_t)); i++)
-                    AWE_LOGD("DcRead tlv bytes data[%d]: 0x%x", i, ctl_elem_payload.value.tlv.tlv[i]);
+                    AWE_LOGD("DcRead tlv bytes data[%d]: 0x%x", i, ctl_elem_payload.value.tlv_data.tlv[i]);
 
                 //clear offset, count and do_set in AweCtrl
                 AweCtrldata->offset = 0;
@@ -1284,14 +1291,14 @@ int AweAudioPlugin::DcRead(struct CtlElemPayload &ctl_elem_payload)
              * so that we don't have to run if-else statements here based on the control type.
              */
             if (mixCtl->ctrl_mode == EVENT_CONTROL) {
-                memcpy(ctl_elem_payload.value.tlv.tlv, AweCtrl->elem_payload.value.tlv.tlv, AweCtrl->elem_count);
+                memcpy(ctl_elem_payload.value.tlv_data.tlv, AweCtrl->elem_payload.value.tlv_data.tlv, AweCtrl->elem_count);
                 for(int i=0; i<AweCtrl->elem_count; i++)
-                    AWE_LOGD("DcRead tlv bytes data[%d]: 0x%x", i, AweCtrl->elem_payload.value.tlv.tlv[i]);
+                    AWE_LOGD("DcRead tlv bytes data[%d]: 0x%x", i, AweCtrl->elem_payload.value.tlv_data.tlv[i]);
             } else if (mixCtl->ctrl_mode == NAMED_CONTROL) {
-                AweCtrlVectorValue_t * AweCtrldata = (AweCtrlVectorValue_t *)&AweCtrl->elem_payload.value.tlv.tlv[0];
-                memcpy(ctl_elem_payload.value.tlv.tlv, AweCtrldata, AweCtrldata->count * sizeof(uint32_t) + sizeof(AweCtrlVectorValue_t));
+                AweCtrlVectorValue_t * AweCtrldata = (AweCtrlVectorValue_t *)&AweCtrl->elem_payload.value.tlv_data.tlv[0];
+                memcpy(ctl_elem_payload.value.tlv_data.tlv, AweCtrldata, AweCtrldata->count * sizeof(uint32_t) + sizeof(AweCtrlVectorValue_t));
                 for(int i=0; i<(AweCtrldata->count * sizeof(uint32_t) + sizeof(AweCtrlVectorValue_t)); i++)
-                    AWE_LOGD("DcRead tlv bytes data[%d]: 0x%x", i, ctl_elem_payload.value.tlv.tlv[i]);
+                    AWE_LOGD("DcRead tlv bytes data[%d]: 0x%x", i, ctl_elem_payload.value.tlv_data.tlv[i]);
 
                 //clear offset, count and do_set in AweCtrl
                 AweCtrldata->offset = 0;
@@ -1438,6 +1445,10 @@ uint32_t AweAudioPlugin::StreamSetParam(string fe_dai_name,struct PCMSetParams &
     return AWE_EOK;
 }
 
+uint32_t AweAudioPlugin::SetParamForCapture(string fe_dai_name,struct PCMSetParams &set_param_payload) {
+   return StreamSetParam(fe_dai_name, set_param_payload);
+}
+
 uint32_t AweAudioPlugin::StreamMmap(string fe_dai_name, PCMMmapParams &msg)
 {
     uint32_t ret = AWE_EOK;
@@ -1515,6 +1526,22 @@ uint32_t AweAudioPlugin::StreamRelease(string fe_dai_name)
         return AWE_EBADPARAM;
     }
     AweStream* stream = it->second;
+
+    if (stream->monitor_thread.joinable()) {
+        AWE_LOGI("StreamRelease called but thread still running, forcing join: %s", fe_dai_name.c_str());
+        {
+            std::lock_guard<std::mutex> lock(stream->monitor_mutex);
+            stream->monitor_stop = true;
+            stream->monitor_cond.notify_all();
+        }
+        stream->monitor_thread.join();
+    }
+    {
+        std::lock_guard<std::mutex> lock(stream->monitor_mutex);
+        std::queue<virtio_snd_pcm_buf_msg> empty;
+        std::swap(stream->monitor_queue, empty);
+        stream->monitor_stop = false;
+    }
     if ((stream->handle == 0) || (stream->state == PCM_STATE_CLOSED)) {
         AWE_LOGE("AWE Stream %s already closed", fe_dai_name.c_str());
         return AWE_EFAILED;
@@ -1586,7 +1613,15 @@ uint32_t AweAudioPlugin::StreamStart(string fe_dai_name)
         return ret;
     }
     stream->state = PCM_STATE_RUNNING;
+    stream->monitor_stop = false;
 
+    stream->cb_func = global_cb_func_; 
+
+    if (!stream->cb_func) {
+        AWE_LOGE("Warning: No callback registered for stream %s", stream->fe_dai_name.c_str());
+    }
+
+    stream->monitor_thread = std::thread(&AweAudioPlugin::MonitorThreadLoop, this, stream);
     std::lock_guard<std::mutex> rw_lock(stream->stream_mutex);
     stream->stream_cond.notify_one();
 
@@ -1607,6 +1642,26 @@ uint32_t AweAudioPlugin::StreamStop(string fe_dai_name)
     if (stream->handle == 0){
         AWE_LOGE("Invalid handle for AWE Stream %s", fe_dai_name.c_str());
         return AWE_EHANDLE;
+    }
+
+    if (stream->monitor_thread.joinable()) {
+        {
+            std::lock_guard<std::mutex> lock(stream->monitor_mutex);
+            stream->monitor_stop = true;
+            stream->monitor_cond.notify_all();
+        }
+        stream->monitor_thread.join();
+        AWE_LOGI("AWE stream: %s Monitor thread joined", fe_dai_name.c_str());
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(stream->monitor_mutex);
+        if (!stream->monitor_queue.empty()) {
+            AWE_LOGI("AWE stream: %s clearing %zu remaining msgs", fe_dai_name.c_str(), stream->monitor_queue.size());
+            std::queue<virtio_snd_pcm_buf_msg> empty;
+            std::swap(stream->monitor_queue, empty);
+        }
+        stream->monitor_stop = false;
     }
 
     AWE_LOGI("AWE stream: %s StreamStop start", fe_dai_name.c_str());
@@ -1665,6 +1720,12 @@ uint32_t AweAudioPlugin::StreamWrite(virtio_snd_pcm_buf_msg &msg)
             AWE_LOGE("AWE stream : %s write failed", msg.fe_dai_name.c_str());
             return ret;
         }
+
+        {
+            std::lock_guard<std::mutex> lock(stream->monitor_mutex);
+            stream->monitor_queue.push(msg);
+        }
+        stream->monitor_cond.notify_one();
     }
 
     return AWE_EOK;
@@ -1752,7 +1813,50 @@ uint32_t AweAudioPlugin::StreamWriteDone(virtio_snd_pcm_buf_msg &msg)
     return AWE_EOK;
 }
 
-int AweAudioPlugin::StreamRead(virtio_snd_pcm_buf_msg &msg)
+void AweAudioPlugin::MonitorThreadLoop(AweStream* stream)
+{
+    pthread_setname_np(pthread_self(), ("awe_mon_" + stream->fe_dai_name).substr(0, 15).c_str());
+    int ret = 0;
+    while (true) {
+        virtio_snd_pcm_buf_msg msg;
+        bool should_exit = false;
+        {
+            std::unique_lock<std::mutex> lock(stream->monitor_mutex);
+            stream->monitor_cond.wait(lock, [stream] {
+                return stream->monitor_stop || !stream->monitor_queue.empty();
+            });
+
+            if (stream->monitor_stop && stream->monitor_queue.empty()) {
+                 should_exit = true;
+            } else if (stream->monitor_stop) {
+                //have msg but got stop ,exit and ignore data
+                AWE_LOGE("MonitorThread: Forced stop with pending data. Dropping.");
+                should_exit = true;
+            } else {
+                // normal process
+                msg = stream->monitor_queue.front();
+                stream->monitor_queue.pop();
+            }
+        }
+        if (should_exit) {
+            break;
+        }
+
+        // only polling for playback
+        if (stream->direction == SNDRV_PCM_STREAM_PLAYBACK) {
+            ret = StreamWriteDone(msg);
+        }
+
+        if (stream->cb_func) {
+            if (ret != AWE_EOK) {
+                AWE_LOGE("StreamWriteDone failed, still calling cb to release msg");
+            }
+            stream->cb_func(msg.fe_dai_name, msg.offset);
+        }
+    }
+}
+
+uint32_t AweAudioPlugin::StreamRead(virtio_snd_pcm_buf_msg &msg)
 {
     uint32_t ret = AWE_EOK;
     struct awe_rw_buffer rw_buff = {0};
@@ -1795,6 +1899,11 @@ int AweAudioPlugin::StreamRead(virtio_snd_pcm_buf_msg &msg)
             AWE_LOGE("AWE stream : %s read failed", msg.fe_dai_name.c_str());
             return ret;
         }
+        {
+            std::lock_guard<std::mutex> lock(stream->monitor_mutex);
+            stream->monitor_queue.push(msg);
+        }
+        stream->monitor_cond.notify_one();
     }
     return AWE_EOK;
 }
@@ -1881,8 +1990,8 @@ uint32_t AweAudioPlugin::InitClassResource()
         newCtrlValue->elem_payload.type = ele_info.type;
         if (ele_info.access & tlv_mask) {
             newCtrlValue->elem_payload.access_control = ACCESS_TLV_READWRITE;
-            newCtrlValue->elem_payload.value.tlv.tlv = new uint8_t[MAX_TLV_SIZE];
-            memset(newCtrlValue->elem_payload.value.tlv.tlv, 0, MAX_TLV_SIZE);
+            newCtrlValue->elem_payload.value.tlv_data.tlv = new uint8_t[MAX_TLV_SIZE];
+            memset(newCtrlValue->elem_payload.value.tlv_data.tlv, 0, MAX_TLV_SIZE);
             AWE_LOGI("ctrl is tlv %s.",newCtrlValue->elem_payload.name.c_str());
         }
         else {
@@ -1910,8 +2019,8 @@ fail:
     fe_dai_awe_map_.clear();
 
     for (auto& iter : kctrl_value_map_) {
-        if (iter.second->elem_payload.access_control == ACCESS_TLV_READWRITE && iter.second->elem_payload.value.tlv.tlv != nullptr)
-            delete[] iter.second->elem_payload.value.tlv.tlv;
+        if (iter.second->elem_payload.access_control == ACCESS_TLV_READWRITE && iter.second->elem_payload.value.tlv_data.tlv != nullptr)
+            delete[] iter.second->elem_payload.value.tlv_data.tlv;
         delete iter.second;
         iter.second = nullptr;
     }
@@ -1928,8 +2037,8 @@ void AweAudioPlugin::ReleaseClassResource()
     fe_dai_awe_map_.clear();
 
     for (auto& iter : kctrl_value_map_) {
-        if (iter.second->elem_payload.access_control == ACCESS_TLV_READWRITE && iter.second->elem_payload.value.tlv.tlv != nullptr)
-            delete[] iter.second->elem_payload.value.tlv.tlv;
+        if (iter.second->elem_payload.access_control == ACCESS_TLV_READWRITE && iter.second->elem_payload.value.tlv_data.tlv != nullptr)
+            delete[] iter.second->elem_payload.value.tlv_data.tlv;
         delete iter.second;
         iter.second = nullptr;
     }
@@ -2007,4 +2116,10 @@ uint32_t AweAudioPlugin::AweGetCoreErrorInfo(AweCtrlValue *AweCtrl)
 #endif
     return rc;
 
+}
+
+void AweAudioPlugin::RegisterPcmMsgCallbackFunc(std::function<void(std::string &, uint32_t)> cb_func)
+{
+    AWE_LOGD("RegisterPcmMsgCallbackFunc");
+    global_cb_func_ = cb_func;
 }

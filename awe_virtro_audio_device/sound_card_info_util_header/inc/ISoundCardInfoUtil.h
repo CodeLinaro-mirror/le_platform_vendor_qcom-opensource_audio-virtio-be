@@ -2,6 +2,7 @@
  * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
  * SPDX-License-Identifier: BSD-3-Clause-Clear
  */
+
 #ifndef I_SOUND_CARD_INFO_UTIL_H_
 #define I_SOUND_CARD_INFO_UTIL_H_
 

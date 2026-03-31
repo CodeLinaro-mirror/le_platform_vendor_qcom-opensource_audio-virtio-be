@@ -9,6 +9,13 @@
 
 #define DEVICE_HOSTLESS_PREFIX "Hostless"
 
+#include "awe_log_util.h"
+/******************************************************************************/
+/*********************************** MACROS ***********************************/
+/******************************************************************************/
+#define AWE_LOGE(...) AUDIO_BASE_LOG(BASE_LOG_ERROR, MODULE_VIO_AUD_DEV, __VA_ARGS__)
+#define AWE_LOGI(...) AUDIO_BASE_LOG(BASE_LOG_INFO, MODULE_VIO_AUD_DEV, __VA_ARGS__)
+#define AWE_LOGD(...) AUDIO_BASE_LOG(BASE_LOG_DEBUG, MODULE_VIO_AUD_DEV, __VA_ARGS__)
 static uint32_t getSndCtlElemValueCount(uint32_t ctl_type, uint32_t ctl_access)
 {
     uint32_t limit_count = 0;

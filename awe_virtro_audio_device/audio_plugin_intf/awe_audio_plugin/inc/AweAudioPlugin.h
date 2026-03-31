@@ -17,6 +17,10 @@
 #include <chrono>
 #include <functional>
 
+#include <thread>
+#include <queue>
+#include <atomic>
+
 #include "audio_plugin_interface.h"
 #include "awe_api.h"
 #include "awe_defs.h"
@@ -30,6 +34,8 @@
 #define AWE_STREAM_EVENT_EOS                            0x2
 #define	MAX_PROCESSORS                                  4
 #define TLV_HEADER_SIZE                                 8
+
+
 enum AweStreamState {
   PCM_STATE_CLOSED = -1,
   PCM_STATE_OPEN,
@@ -78,6 +84,14 @@ struct AweStream {
   AweBufPool                            buf_pool;
   uint32_t                              gvm_mmap_fd;
   struct awe_buf_raw_info               raw_buff_info;
+
+  std::thread                           monitor_thread;
+  std::queue<virtio_snd_pcm_buf_msg>    monitor_queue;
+  std::mutex                            monitor_mutex;
+  std::condition_variable               monitor_cond;
+  std::atomic<bool>                     monitor_stop{false};
+
+  std::function<void(std::string &, uint32_t)> cb_func;
 };
 
 struct AweCtrlValue {
@@ -119,18 +133,20 @@ class AweAudioPlugin : public IAudioPlugin {
         uint32_t DcWrite(const struct CtlElemPayload &ctl_elem_payload) override;
         int DcRead(struct CtlElemPayload &ctl_elem_payload) override;
         uint32_t StreamSetParam(string fe_dai_name,struct PCMSetParams &set_param_payload) override;
+        uint32_t SetParamForCapture(string fe_dai_name,struct PCMSetParams& set_param_payload) override;
         uint32_t StreamPrepare(string fe_dai_name) override;
         uint32_t StreamRelease(string fe_dai_name) override;
         uint32_t StreamStart(string fe_dai_name) override;
         uint32_t StreamStop(string fe_dai_name) override;
         uint32_t StreamWrite(struct virtio_snd_pcm_buf_msg &msg) override;
         uint32_t StreamWriteDone(struct virtio_snd_pcm_buf_msg &msg) override;
-        int StreamRead(struct virtio_snd_pcm_buf_msg &msg) override;
+        uint32_t StreamRead(struct virtio_snd_pcm_buf_msg &msg) override;
         uint32_t StreamMmap(string fe_dai_name, struct PCMMmapParams &msg) override;
         int RegisterSSREvent(std::function<void(enum SSRState)> ssr_cb_func) override;
         uint32_t InitClassResource() override;
         void ReleaseClassResource() override;
         int RegisterEventCallback(std::function<void(uint32_t control_id)> event_cb_func) override;
+        void RegisterPcmMsgCallbackFunc(std::function<void(std::string &, uint32_t)> cb_func) override;
         AweCtrlValue* GetAweCtrlFromName(const char *ctrl_name);
 
         // function object to call after event notification
@@ -152,5 +168,7 @@ class AweAudioPlugin : public IAudioPlugin {
         vector<SoundCardMixerCtl> *all_mixer_ctl_;
         std::vector<AweShmemMapInfo> shmem_map_info;
         uint32_t awe_snd_card_handle_;
+        std::function<void(std::string &, uint32_t)> global_cb_func_;
+        void MonitorThreadLoop(AweStream* stream);
 };
 #endif

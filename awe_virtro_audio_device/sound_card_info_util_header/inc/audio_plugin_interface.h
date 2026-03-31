@@ -1,3 +1,8 @@
+/**
+ * @file audio_plugin_interface.h
+ * @brief Abstract class for the IAudioPlugin to have concrete implementations using CSD2 or AlsaLib
+ */
+
 /*
  * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
  * SPDX-License-Identifier: BSD-3-Clause-Clear
@@ -13,11 +18,26 @@
 #define __u8    uint8_t
 #define __le32  uint32_t
 
+typedef int snd_ctl_elem_type_t;
+//#define SNDRV_CTL_ELEM_TYPE_NONE       0 /* invalid */
+//#define SNDRV_CTL_ELEM_TYPE_BOOLEAN    1 /* boolean type */
+//#define SNDRV_CTL_ELEM_TYPE_INTEGER    2 /* integer type */
+//#define SNDRV_CTL_ELEM_TYPE_ENUMERATED 3 /* enumerated type */
+//#define SNDRV_CTL_ELEM_TYPE_BYTES      4 /* byte array */
+//#define SNDRV_CTL_ELEM_TYPE_IEC958     5 /* IEC958 (S/PDIF) setup */
+//#define SNDRV_CTL_ELEM_TYPE_INTEGER64  6 /* 64-bit integer type */
+//#define SNDRV_CTL_ELEM_TYPE_LAST       SNDRV_CTL_ELEM_TYPE_INTEGER64
+
 using namespace std;
 
 enum CtlElemAccessControl {
   ACCESS_TLV_READWRITE = 0,
   ACCESS_READWRITE,
+};
+
+enum AccessControl {
+  tlv_bytes = 0,
+  bytes,
 };
 
 enum SSRState {
@@ -27,27 +47,29 @@ enum SSRState {
 };
 
 struct CtlElemPayload {
-  string name;
-  uint32_t control_id;
-  snd_ctl_elem_type_t type;   /* R: value type - SNDRV_CTL_ELEM_TYPE_* */
-  CtlElemAccessControl access_control;
-  union {
+    std::string name;
+    uint32_t control_id;
+    snd_ctl_elem_type_t type;   /* R: value type - SNDRV_CTL_ELEM_TYPE_* */
+    CtlElemAccessControl access_control;
+    uint32_t vmid;              /* VM ID, set by AudioDeviceManager before calling DcWrite */
     union {
-      int32_t value[128];
-    } integer;
-    union {
-      int64_t value[64];
-    } integer64;
-    union {
-      unsigned int item[128];
-    } enumerated;
-    union {
-      unsigned char data[512];
-    } bytes;
-    union {
-      uint8_t *tlv;
-    } tlv;
-  } value;        /* RO */
+        union {
+            long value[128];
+        } integer;
+        union {
+            long long value[64];
+        } integer64;
+        union {
+            unsigned int item[128];
+        } enumerated;
+        union {
+            unsigned char data[512];
+        } bytes;
+        struct {
+            uint8_t* tlv;
+            uint32_t tlv_size;
+        } tlv_data;
+    } value;        /* RO */
 };
 
 struct PCMSetParams {
@@ -66,7 +88,6 @@ struct PCMSetParams {
   /* indicates if this usecase is mmap. In mmap mode,
      the buffer config needs to be done in mmap call */
   __u8 is_mmap_noirq;
-
   /* the dmabuf file descriptor for the data buffer */
   __le64 buff_fd;
 };
@@ -90,6 +111,12 @@ struct PCMMmapParams {
   uint32_t pos_gvm_fd;
 };
 #endif
+struct MmapBufInfo {
+  int32_t data_buf_fd;
+  int32_t data_buf_size;
+  int32_t pos_buf_fd;
+  int32_t pos_buf_size;
+};
 
 class IAudioPlugin {
  public:
@@ -103,18 +130,21 @@ class IAudioPlugin {
   virtual uint32_t DcWrite(const struct CtlElemPayload &ctl_elem_payload) = 0;
   virtual int DcRead(struct CtlElemPayload &ctl_elem_payload) = 0;
   virtual uint32_t StreamSetParam(string fe_dai_name, struct PCMSetParams &set_param_payload) = 0;
+  virtual uint32_t SetParamForCapture(string fe_dai_name, struct PCMSetParams &set_param_payload) = 0;
   virtual uint32_t StreamPrepare(string fe_dai_name) = 0;
   virtual uint32_t StreamRelease(string fe_dai_name) = 0;
   virtual uint32_t StreamStart(string fe_dai_name) = 0;
   virtual uint32_t StreamStop(string fe_dai_name) = 0;
-  virtual uint32_t StreamWrite(struct virtio_snd_pcm_buf_msg &msg) = 0; // need to review payload
+  virtual uint32_t StreamWrite(struct virtio_snd_pcm_buf_msg &msg) = 0;
   virtual uint32_t StreamWriteDone(struct virtio_snd_pcm_buf_msg &msg) = 0; // need to review payload
-  virtual int StreamRead(struct virtio_snd_pcm_buf_msg &msg) = 0;  // need to review payload
+  virtual uint32_t StreamRead(struct virtio_snd_pcm_buf_msg &msg) = 0;  // need to review payload
   virtual uint32_t StreamMmap(string fe_dai_name, struct PCMMmapParams &msg) = 0;
   virtual int RegisterSSREvent(std::function<void(enum SSRState)> ssr_cb_func) = 0;
   virtual int RegisterEventCallback(std::function<void(uint32_t control_id)> event_cb_func) = 0;
   virtual uint32_t InitClassResource() { return 0; };
   virtual void ReleaseClassResource() {};
+  virtual void RegisterPcmMsgCallbackFunc(std::function<void(string &fe_dai_name,
+          uint32_t msg_offset)> adm_cb_func) = 0;
 
  protected:
   std::vector<FrontendInfo> *all_fe_dai_;
