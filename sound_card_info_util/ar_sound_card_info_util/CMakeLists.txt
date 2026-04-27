@@ -10,23 +10,30 @@ set(CMAKE_CXX_STANDARD 14)
 # Helpful 'set'
 ################################################################################
 # Let SCIU stand for SoundCardInfoUtil
-set(SCIU_PROJECT_NAME
-    SoundCardInfoUtil
+set(ARSCIU_PROJECT_NAME
+    ArSoundCardInfoUtil
 )
-set(SCIU_SOURCE_DIR
-    src
+
+set(ARSCIU_DIR
+    ${CMAKE_CURRENT_LIST_DIR}
 )
-set(SCIU_SOURCE
-    ${SCIU_SOURCE_DIR}/SoundCardInfoUtil.cpp
+
+set(ARSCIU_SOURCE_DIR
+    ${ARSCIU_DIR}/src
 )
-set(SCIU_HEADERS_DIR
-    inc/
+set(ARSCIU_SOURCE
+    ${ARSCIU_SOURCE_DIR}/ArSoundCardInfoUtil.cpp
 )
-set(SCIU_HEADERS
-    ${SCIU_HEADERS_DIR}/ISoundCardInfoUtil.h
-    ${SCIU_HEADERS_DIR}/SoundCardInfoUtil.h
-    ${SCIU_HEADERS_DIR}/SoundCardInfoTypes.h
-    ${SCIU_HEADERS_DIR}/virtio_snd.h
+set(COMMON_HEADER_DIR
+    ${PROJECT_ROOT_DIR}/inc/
+)
+
+set(ARSCIU_HEADERS_DIR
+    ${ARSCIU_DIR}/inc/
+)
+
+set(ARSCIU_HEADERS
+    ${ARSCIU_HEADERS_DIR}/ArSoundCardInfoUtil.h
 )
 
 set(SCIU_LIBRARIES_DIR
@@ -78,29 +85,27 @@ set(XML_PARSER_HEADERS
 ################################################################################
 # Project meta
 ################################################################################
-project(SoundCardInfoUtil)
+project(ArSoundCardInfoUtil)
 find_package(Threads)
 find_package(EXPAT REQUIRED)
-
 ################################################################################
 # Project dependencies
 ################################################################################
-add_library(${SCIU_PROJECT_NAME}
-    SHARED
-    ${SCIU_SOURCE} ${DAI_BUILDER_SRC} ${MIXER_CTL_SRC} ${XML_PARSER_SRC}
-    ${SCIU_HEADERS} ${DAI_BUILDER_HEADERS} ${MIXER_CTL_HEADERS} ${XML_PARSER_HEADERS}
+add_library(${ARSCIU_PROJECT_NAME} SHARED
+    ${ARSCIU_SOURCE} ${DAI_BUILDER_SRC} ${MIXER_CTL_SRC} ${XML_PARSER_SRC}
+    ${COMMON_HEADERS} ${DAI_BUILDER_HEADERS} ${MIXER_CTL_HEADERS} ${XML_PARSER_HEADERS}
+    ${ARSCIU_HEADERS}
 )
 
 include_directories(
-    ${SCIU_HEADERS_DIR}
+    ${ARSCIU_HEADERS_DIR}
     ${DAI_BUILDER_HEADERS_DIR}
     ${MIXER_CTL_HEADERS_DIR}
     ${XML_PARSER_HEADERS_DIR}
 )
 
-target_link_libraries(${SCIU_PROJECT_NAME} PUBLIC EXPAT::EXPAT)
-target_link_libraries(${SCIU_PROJECT_NAME} PUBLIC audio_log_util)
+target_link_libraries(${ARSCIU_PROJECT_NAME} PUBLIC EXPAT::EXPAT)
+target_link_libraries(${ARSCIU_PROJECT_NAME} PUBLIC audio_log_util awe_utils)
 
-install(TARGETS ${SCIU_PROJECT_NAME} LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}")
-install(DIRECTORY ${SCIU_HEADERS_DIR} ${DAI_BUILDER_HEADERS_DIR} ${MIXER_CTL_HEADERS_DIR} ${XML_PARSER_HEADERS_DIR}
-        DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")
+install(TARGETS ${ARSCIU_PROJECT_NAME} LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}")
+install(DIRECTORY ${ARSCIU_HEADERS_DIR}   ${DAI_BUILDER_HEADERS_DIR} ${MIXER_CTL_HEADERS_DIR} ${XML_PARSER_HEADERS_DIR} DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")

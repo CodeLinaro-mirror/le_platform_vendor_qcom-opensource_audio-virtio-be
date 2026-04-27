@@ -4,7 +4,7 @@
  */
 
 #include "SoundCardInfoTypes.h"
-
+#include "audio_log_util.h"
 class MixerCtlBuilder {
 public:
     static uint32_t BuildAllMixerCtls(const FrontendVectors &frontends,

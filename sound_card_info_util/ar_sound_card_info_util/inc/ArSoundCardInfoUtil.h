@@ -9,7 +9,7 @@
 #include "SoundCardInfoTypes.h"
 #include "ISoundCardInfoUtil.h"
 #include <vector>
-
+#include "audio_log_util.h"
 #ifndef SOUND_CARD_INFO_UTIL_H_
 #define SOUND_CARD_INFO_UTIL_H_
 

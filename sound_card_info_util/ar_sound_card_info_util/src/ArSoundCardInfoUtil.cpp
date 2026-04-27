@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: BSD-3-Clause-Clear
  */
 
-#include "SoundCardInfoUtil.h"
+#include "ArSoundCardInfoUtil.h"
 
 /* Returns an instance of the SoundCardInfoUtil for a given gvm_id.
    If no gvm_id is provided, the default of 0 is used (i.e. single GVM case).

@@ -4,7 +4,7 @@
  */
 
 #include "SoundCardInfoTypes.h"
-
+#include "audio_log_util.h"
 class DigitalAudioIntfBuilder {
 public:
     template <typename VectorT>

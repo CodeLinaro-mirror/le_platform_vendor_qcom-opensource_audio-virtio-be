@@ -14,7 +14,7 @@
 
 #include <expat.h>
 #include "SoundCardInfoTypes.h"
-
+#include "audio_log_util.h"
 /* Config Files Directory Path */
 #ifndef XML_PATH
 #define XML_PATH   "/etc/sciu_cfg/"
