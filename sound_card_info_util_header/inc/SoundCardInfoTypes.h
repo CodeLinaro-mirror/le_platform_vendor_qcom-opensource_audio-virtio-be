@@ -24,7 +24,7 @@
 #include "sound/asound.h"
 #endif
 #include "virtio_snd.h"
-#include "awe_types.h"
+
 #ifdef __QNX__
 typedef int snd_ctl_elem_iface_t;
 typedef int snd_ctl_elem_type_t;
@@ -193,7 +193,12 @@ struct SoundCardMixerCtl {
     #else
     int type;
     #endif
-    awe_control_type_t awe_ctl_type;
+    /* Renamed from awe_ctl_type to plugin_ctl_type to avoid leaking AWE-domain
+     * naming into this shared header.  The field stores the plugin-specific
+     * control type (e.g. awe_control_type_t cast to uint32_t for AWE; unused
+     * for AR).
+     * TODO: move this field to an AWE-only header once the full cleanup lands. */
+    uint32_t plugin_ctl_type;
     MixerControlMode ctrl_mode;
     unsigned int access;
     unsigned int count;

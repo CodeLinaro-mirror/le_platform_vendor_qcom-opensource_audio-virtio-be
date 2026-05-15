@@ -193,3 +193,25 @@ std::vector<MixerCtlInfo> SoundCardInfoUtil::CreateMixerCtlMap(std::vector<Sound
 
     return all_mixer_ctl_info;
 }
+
+extern "C" {
+    ISoundCardInfoUtil* createArSoundCardInfoUtil(const int gvm_id) {
+        return new SoundCardInfoUtil(gvm_id);
+    }
+    void destroyArSoundCardInfoUtil(ISoundCardInfoUtil* sciu) {
+        delete sciu;
+    }
+    /* static_cast is safe here: createArSoundCardInfoUtil is the sole factory
+     * for SoundCardInfoUtil and always returns a SoundCardInfoUtil*.
+     * Using static_cast avoids an RTTI dependency that would be fragile when
+     * this DSO is loaded with RTLD_LOCAL. */
+    std::vector<MixerCtlInfo>* createArMixerCtlMap(ISoundCardInfoUtil* sciu,
+                                                    std::vector<SoundCardMixerCtl>* mixer_ctls) {
+        SoundCardInfoUtil* ar_sciu = static_cast<SoundCardInfoUtil*>(sciu);
+        if (!ar_sciu || !mixer_ctls) return nullptr;
+        return new std::vector<MixerCtlInfo>(ar_sciu->CreateMixerCtlMap(*mixer_ctls));
+    }
+    void destroyArMixerCtlMap(std::vector<MixerCtlInfo>* map) {
+        delete map;
+    }
+}
