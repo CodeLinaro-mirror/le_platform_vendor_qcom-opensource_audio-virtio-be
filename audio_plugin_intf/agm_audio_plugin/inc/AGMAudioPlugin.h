@@ -6,6 +6,7 @@
 #define AGMAUDIOPLUGIN_H_
 
 #include "audio_plugin_interface.h"
+#include <mutex>
 #include <optional>
 #include "agm/agm_api.h"
 #include "audio_log_util.h"
@@ -25,6 +26,7 @@ struct AGMsession {
   void*                                agm_ap_instance;
   void*                                vaddr_dma_area;
   uint32_t                             dma_area_size;
+  std::mutex                           stream_mutex;
 };
 
 enum ControlType {
@@ -86,6 +88,9 @@ public:
     // control_id is the vector index
   vector<MixerCtlInfo> *all_mixer_ctl_info_;
 private:
+      static void SSRCallbackFunc(enum agm_ssr_event_type event_type, void *client_data);
+      std::function<void(enum SSRState)> adm_ssr_cb;
+      void ClearSessionInfo();
       ControlType stringToControlType(const std::string& str);
       void debugMetaDataPrintout(std::string typeMetadata, uint32_t* metadata, uint32_t numElements);
 };
