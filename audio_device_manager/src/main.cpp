@@ -3,16 +3,17 @@
  * SPDX-License-Identifier: BSD-3-Clause-Clear
  */
 
-#include "AweAudioPlugin.h"
-#include "AweSoundCardInfoUtil.h"
-#include "AGMAudioPlugin.h"
-#include "ArSoundCardInfoUtil.h"
+#include "audio_plugin_wrapper.h"
+#include "sound_card_info_wrapper.h"
 #include "AudioDeviceManager.h"
-#include <iostream>
+#include <memory>
 
 ADMServiceType g_adm_service_type = ADM_TYPE_AR;
 extern "C" {
     static AudioDeviceManager *adm = nullptr;
+
+    static std::unique_ptr<AudioPluginWrapper>    g_plugin_wrapper;
+    static std::unique_ptr<SoundCardInfoWrapper>  g_sciu_wrapper;
 
     int adm_init(const char* service_type)
     {
@@ -32,57 +33,67 @@ extern "C" {
             AUDIO_BASE_LOG(BASE_LOG_ERROR, MODULE_VIO_AUD_DEV, "service_type is NULL");
             return -1;
         }
-        ISoundCardInfoUtil *sciu = nullptr;
-        // Create SoundCardInfoUtil based on service type
-        if (g_adm_service_type == ADM_TYPE_AWE) {
-            sciu = new AweSoundCardInfoUtil();
-            AUDIO_BASE_LOG(BASE_LOG_INFO, MODULE_VIO_AUD_DEV, "Created AweSoundCardInfoUtil");
-        } else if (g_adm_service_type == ADM_TYPE_AR) {
-            sciu= new SoundCardInfoUtil();
-            AUDIO_BASE_LOG(BASE_LOG_INFO, MODULE_VIO_AUD_DEV, "Created ArSoundCardInfoUtil");
-        }
 
-        HabImpl *hab = new HabImpl();
+        // Create SoundCardInfoWrapper — dlopen AR or AWE .so based on service type
+        if (g_adm_service_type == ADM_TYPE_AR) {
+            g_sciu_wrapper.reset(SoundCardInfoWrapper::CreateAR(ADM_HOST_GVM_ID));
+        } else {
+            g_sciu_wrapper.reset(SoundCardInfoWrapper::CreateAWE(ADM_HOST_GVM_ID));
+        }
+        if (!g_sciu_wrapper) {
+            AUDIO_BASE_LOG(BASE_LOG_ERROR, MODULE_VIO_AUD_DEV,
+                           "Failed to create SoundCardInfoWrapper (dlopen failed)!");
+            return -1;
+        }
+        ISoundCardInfoUtil *sciu = g_sciu_wrapper->Get();
+        AUDIO_BASE_LOG(BASE_LOG_INFO, MODULE_VIO_AUD_DEV,
+                       "Created SoundCardInfoWrapper for service_type=%d", g_adm_service_type);
+
+        // Use unique_ptr so that all failure paths below automatically free these objects.
+        std::unique_ptr<HabImpl> hab(new HabImpl());
 
         if (sciu->BuildSoundCard()) {
             AUDIO_BASE_LOG(BASE_LOG_ERROR, MODULE_VIO_AUD_DEV, "Failed to build sound card!");
             return -1;
         }
 
-        std::vector<FrontendInfo> *fe_info = new std::vector<FrontendInfo>(sciu->GetPCMSubstreams());
-        if (fe_info == nullptr) {
-            AUDIO_BASE_LOG(BASE_LOG_ERROR, MODULE_VIO_AUD_DEV, "Failed to get PCM substreams!");
+        std::unique_ptr<std::vector<FrontendInfo>> fe_info(
+                new std::vector<FrontendInfo>(sciu->GetPCMSubstreams()));
+        if (fe_info->empty()) {
+            AUDIO_BASE_LOG(BASE_LOG_ERROR, MODULE_VIO_AUD_DEV, "No PCM frontends found!");
             return -1;
         }
 
-        std::vector<SoundCardMixerCtl> *sc_mixer_ctl = new std::vector<SoundCardMixerCtl>(sciu->GetMixerCtls());
-        if (sc_mixer_ctl == nullptr) {
-            AUDIO_BASE_LOG(BASE_LOG_ERROR, MODULE_VIO_AUD_DEV, "Failed to get mixer controls!");
-            return -1;
-        }
+        std::unique_ptr<std::vector<SoundCardMixerCtl>> sc_mixer_ctl(
+                new std::vector<SoundCardMixerCtl>(sciu->GetMixerCtls()));
 
-     // Create AudioPlugin and AudioDeviceManager based on service type
+        // Create AudioPlugin and AudioDeviceManager based on service type
         if (g_adm_service_type == ADM_TYPE_AWE) {
-            AweAudioPlugin *awe_audio_plugin = new AweAudioPlugin(fe_info, sc_mixer_ctl);
-            if (awe_audio_plugin == nullptr) {
-                AUDIO_BASE_LOG(BASE_LOG_ERROR, MODULE_VIO_AUD_DEV, "Failed to create AweAudioPlugin!");
+            g_plugin_wrapper.reset(AudioPluginWrapper::CreateAWE(fe_info.get(),
+                                                                  sc_mixer_ctl.get()));
+            if (!g_plugin_wrapper) {
+                AUDIO_BASE_LOG(BASE_LOG_ERROR, MODULE_VIO_AUD_DEV,
+                               "Failed to create AudioPluginWrapper for AWE (dlopen failed)!");
                 return -1;
             }
-            adm = new AudioDeviceManager(awe_audio_plugin, sciu, hab, fe_info, sc_mixer_ctl);
+            adm = new AudioDeviceManager(g_plugin_wrapper->Get(), sciu, hab.release(),
+                                         fe_info.release(), sc_mixer_ctl.release());
             AUDIO_BASE_LOG(BASE_LOG_INFO, MODULE_VIO_AUD_DEV, "Created AudioDeviceManager with AweAudioPlugin");
         } else if (g_adm_service_type == ADM_TYPE_AR) {
-            SoundCardInfoUtil *ar_sciu = dynamic_cast<SoundCardInfoUtil*>(sciu);
-            std::vector<MixerCtlInfo> *all_mixer_ctl_info = new std::vector<MixerCtlInfo>(ar_sciu->CreateMixerCtlMap(*sc_mixer_ctl));
-            if (all_mixer_ctl_info == nullptr || all_mixer_ctl_info->empty()) {
+            if (!g_sciu_wrapper->BuildMixerCtlMap(sc_mixer_ctl.get()) ||
+                g_sciu_wrapper->GetMixerCtlMap()->empty()) {
                 AUDIO_BASE_LOG(BASE_LOG_ERROR, MODULE_VIO_AUD_DEV, "Failed to create mixer control map");
                 return -1;
             }
-            AGMAudioPlugin *agm_audio_plugin = new AGMAudioPlugin(fe_info, all_mixer_ctl_info);
-            if (agm_audio_plugin == nullptr) {
-                AUDIO_BASE_LOG(BASE_LOG_ERROR, MODULE_VIO_AUD_DEV, "Failed to create AGMAudioPlugin!");
+            g_plugin_wrapper.reset(AudioPluginWrapper::CreateAR(fe_info.get(),
+                                                                 g_sciu_wrapper->GetMixerCtlMap()));
+            if (!g_plugin_wrapper) {
+                AUDIO_BASE_LOG(BASE_LOG_ERROR, MODULE_VIO_AUD_DEV,
+                               "Failed to create AudioPluginWrapper for AR (dlopen failed)!");
                 return -1;
             }
-            adm = new AudioDeviceManager(agm_audio_plugin, sciu, hab, fe_info, sc_mixer_ctl);
+            adm = new AudioDeviceManager(g_plugin_wrapper->Get(), sciu, hab.release(),
+                                         fe_info.release(), sc_mixer_ctl.release());
             AUDIO_BASE_LOG(BASE_LOG_INFO, MODULE_VIO_AUD_DEV, "Created AudioDeviceManager with AGMAudioPlugin");
         }
 
@@ -102,9 +113,13 @@ extern "C" {
     int adm_deinit()
     {
         if (adm) {
-          std::cout << "deleting adm instance" << std::endl;
+          AUDIO_BASE_LOG(BASE_LOG_INFO, MODULE_VIO_AUD_DEV, "deleting adm instance");
           delete adm;
+          adm = nullptr;
         }
+        // Destroy wrappers after adm
+        g_plugin_wrapper.reset();
+        g_sciu_wrapper.reset();
         g_adm_service_type = ADM_TYPE_UNINITIALIZED;
         return 0;
     }

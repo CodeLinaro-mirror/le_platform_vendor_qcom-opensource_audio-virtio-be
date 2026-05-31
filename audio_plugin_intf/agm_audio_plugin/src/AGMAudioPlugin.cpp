@@ -422,8 +422,7 @@ uint32_t AGMAudioPlugin::DcWrite(const CtlElemPayload& ctl_elem_payload) {
             aif_name = fe_dai_session_id_map_[dai_name].be_dai_name;
 
             if (aif_name == "ZERO")
-              ctl_elem_payload.value.tlv_data.tlv_size = 0;
-              break;
+              aif_id = -1;
             else
               aif_id = be_dai_aif_id_map_.at(aif_name);
 
@@ -585,8 +584,10 @@ int AGMAudioPlugin::DcRead(CtlElemPayload& ctl_elem_payload) {
         case GET_TAGGED_INFO:
             // handle GET_TAGGED_INFO
             aif_name = fe_dai_session_id_map_[dai_name].be_dai_name;
-            if (aif_name == "ZERO")
-              aif_id = -1;
+            if (aif_name == "ZERO") {
+                ctl_elem_payload.value.tlv_data.tlv_size = 0;
+                break;
+            }
             else
               aif_id = be_dai_aif_id_map_.at(aif_name);
 
@@ -854,3 +855,30 @@ void AGMAudioPlugin::RegisterPcmMsgCallbackFunc(std::function<void(std::string& 
     /* callback for read / write done can be handled by the agm_buf info in the call back */
     adm_pcm_msg_cb_func = adm_cb_func;
 }
+
+extern "C" {
+
+/*
+ *
+ * createAGMAudioPlugin / destroyAGMAudioPlugin use C linkage (no name
+ * mangling) so that the caller can locate them via dlsym().  However,
+ * their signatures contain C++ STL types (std::vector).  This is safe
+ * only when the caller and this DSO are compiled with the same C++ ABI
+ * and linked against the same STL implementation (e.g. both using
+ * libc++ from the same toolchain).  If either side is ever built with a
+ * different toolchain or STL variant, the std::vector layout may differ
+ * and the call will produce undefined behaviour.  Keep caller and callee
+ * in sync.
+ */
+IAudioPlugin* createAGMAudioPlugin(std::vector<FrontendInfo>* all_fe_dai,
+                                    std::vector<MixerCtlInfo>* all_mixer_ctl_info)
+{
+    return new AGMAudioPlugin(all_fe_dai, all_mixer_ctl_info);
+}
+
+void destroyAGMAudioPlugin(IAudioPlugin* plugin)
+{
+    delete plugin;
+}
+
+} // extern "C"

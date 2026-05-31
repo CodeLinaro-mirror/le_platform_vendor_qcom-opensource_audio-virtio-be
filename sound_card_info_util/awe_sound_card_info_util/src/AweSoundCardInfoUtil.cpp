@@ -476,7 +476,7 @@ uint32_t AweSoundCardInfoUtil::AddAweMixCtl(const awe_control_t *awe_ctl)
 #else
     newCtl.id.iface = VIRTIO_CTL_ID_IFACE_MIXER;
 #endif
-    newCtl.awe_ctl_type = awe_ctl->control_type;
+    newCtl.plugin_ctl_type = (uint32_t)awe_ctl->control_type;
     newCtl.ctrl_mode = NAMED_CONTROL;
 #if !defined(__QNX__)
     newCtl.access = SNDRV_CTL_ELEM_ACCESS_READWRITE;
@@ -488,7 +488,7 @@ uint32_t AweSoundCardInfoUtil::AddAweMixCtl(const awe_control_t *awe_ctl)
     AWE_LOGD("awe_ctl->count %d", awe_ctl->count);
 #if !defined(__QNX__)
     if (awe_ctl->count == 1) {
-        switch (newCtl.awe_ctl_type) {
+        switch (newCtl.plugin_ctl_type) {
             case AWE_CONTROL_TYPE_BOOL: {
                 newCtl.type = SNDRV_CTL_ELEM_TYPE_BOOLEAN;
                 break;
@@ -532,7 +532,7 @@ uint32_t AweSoundCardInfoUtil::AddAweMixCtl(const awe_control_t *awe_ctl)
                 break;
             }
             default: {
-                AWE_LOGE("Unrecognized awe_control_type %d", newCtl.awe_ctl_type);
+                AWE_LOGE("Unrecognized awe_control_type %d", newCtl.plugin_ctl_type);
                 newCtl.type = SNDRV_CTL_ELEM_TYPE_NONE;
                 break;
             }
@@ -544,7 +544,7 @@ uint32_t AweSoundCardInfoUtil::AddAweMixCtl(const awe_control_t *awe_ctl)
     }
 #else
     if (awe_ctl->count == 1) {
-        switch (newCtl.awe_ctl_type) {
+        switch (newCtl.plugin_ctl_type) {
             case AWE_CONTROL_TYPE_BOOL: {
                 newCtl.type = VIRTIO_MIXER_CTL_TYPE_MASK_BOOLEAN;
                 break;
@@ -588,7 +588,7 @@ uint32_t AweSoundCardInfoUtil::AddAweMixCtl(const awe_control_t *awe_ctl)
                 break;
             }
             default: {
-                AWE_LOGE("Unrecognized awe_control_type %d", newCtl.awe_ctl_type);
+                AWE_LOGE("Unrecognized awe_control_type %d", newCtl.plugin_ctl_type);
                 newCtl.type = VIRTIO_MIXER_CTL_TYPE_MASK_NONE;
                 break;
             }
@@ -637,14 +637,14 @@ uint32_t AweSoundCardInfoUtil::AddAweEventCtl(const awe_event_t *awe_event)
     newCtl.id.ctl_id = all_mixer_ctrls_.size();
 #if !defined(__QNX__)
     newCtl.id.iface = SNDRV_CTL_ELEM_IFACE_MIXER;
-    newCtl.awe_ctl_type = AWE_CONTROL_TYPE_BYTE;
+    newCtl.plugin_ctl_type = (uint32_t)AWE_CONTROL_TYPE_BYTE;
     newCtl.type = SNDRV_CTL_ELEM_TYPE_BYTES;
     newCtl.ctrl_mode = EVENT_CONTROL;
     newCtl.access = SNDRV_CTL_ELEM_ACCESS_TLV_READWRITE;
     newCtl.count = getSndCtlElemValueCount(AWE_CONTROL_TYPE_BYTE, SNDRV_CTL_ELEM_ACCESS_TLV_READWRITE);
 #else
     newCtl.id.iface = VIRTIO_CTL_ID_IFACE_MIXER;
-    newCtl.awe_ctl_type = AWE_CONTROL_TYPE_BYTE;
+    newCtl.plugin_ctl_type = (uint32_t)AWE_CONTROL_TYPE_BYTE;
     newCtl.type = VIRTIO_MIXER_CTL_TYPE_MASK_BYTES;
     newCtl.ctrl_mode = EVENT_CONTROL;
     newCtl.access = VIRTIO_MIXER_CTL_ACCESS_MASK_TLV_READWRITE;
@@ -654,4 +654,13 @@ uint32_t AweSoundCardInfoUtil::AddAweEventCtl(const awe_event_t *awe_event)
     all_mixer_ctrls_.push_back(newCtl);
     AWE_LOGI("Event control : %s has been successfully added, mixer control size = %d", newCtl.id.name.c_str(), all_mixer_ctrls_.size());
     return AWE_EOK;
+}
+
+extern "C" {
+    ISoundCardInfoUtil* createAweSoundCardInfoUtil(const int gvm_id) {
+        return new AweSoundCardInfoUtil(gvm_id);
+    }
+    void destroyAweSoundCardInfoUtil(ISoundCardInfoUtil* sciu) {
+        delete sciu;
+    }
 }

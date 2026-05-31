@@ -22,6 +22,8 @@ set(ADM_SOURCE_DIR
 set(ADM_SOURCE
     ${ADM_SOURCE_DIR}/main.cpp
     ${ADM_SOURCE_DIR}/AudioDeviceManager.cpp
+    ${ADM_SOURCE_DIR}/audio_plugin_wrapper.cpp
+    ${ADM_SOURCE_DIR}/sound_card_info_wrapper.cpp
 )
 set(ADM_HEADERS_DIR
     inc/
@@ -74,17 +76,10 @@ ${ADM_SOCKET_INTF_HEADERS}
 # add_executable(${ADM_PROJECT_NAME} ${ADM_SOURCE} ${ADM_SOCKET_INTF_SOURCE})
 
 include_directories(${ADM_HEADERS_DIR} ${ADM_SOCKET_INTF_HEADERS_DIR})
-
-target_link_libraries(${ADM_PROJECT_NAME} PRIVATE AweAudioPluginIntf AweSoundCardInfoUtil)
-target_link_libraries(${ADM_PROJECT_NAME} PRIVATE awe_utils)
-target_link_libraries(${ADM_PROJECT_NAME} PRIVATE pthread glib-2.0 cutils)
-target_link_libraries(${ADM_PROJECT_NAME} PRIVATE uhab)
+target_link_libraries(${ADM_PROJECT_NAME} PRIVATE pthread glib-2.0 cutils uhab audio_log_util dl)
 if ("${ENABLE_TARGET}" STREQUAL "sa8797")
     target_link_libraries(${ADM_PROJECT_NAME} PRIVATE compresmgr_client)
 endif()
-target_link_libraries(${ADM_PROJECT_NAME} PRIVATE ArAudioPluginIntf ArSoundCardInfoUtil)
-target_link_libraries(${ADM_PROJECT_NAME} PRIVATE pthread uhab audio_log_util)
-target_link_libraries(${ADM_PROJECT_NAME} PRIVATE glib-2.0 cutils)
 option(ENABLE_COVERAGE "Enable code coverage reporting" OFF)
 # Define an option to enable/disable code coverage during compilation
 if(ENABLE_COVERAGE)
