@@ -21,8 +21,13 @@ struct AGMsession {
   struct agm_buffer_config             buffer_config;
   struct agm_media_config              media_config;
   struct agm_session_config            session_config;
-  int                                  push_pull_data_gvm_fd = -1;
-  int                                  push_pull_pos_gvm_fd = -1;
+  /* mmap (EXTERN_PUSH_PULL) fields */
+  int                                  push_pull_data_gvm_fd = -1;  /**< GVM-side fd, returned via getBufInfo */
+  int                                  push_pull_pos_gvm_fd  = -1;  /**< GVM-side fd, returned via getBufInfo */
+  int                                  push_pull_data_pvm_fd = -1;  /**< PVM-side fd, passed to AGM/GSL */
+  int                                  push_pull_pos_pvm_fd  = -1;  /**< PVM-side fd, passed to AGM/GSL */
+  uint32_t                             push_pull_data_size   = 0;   /**< data buf size in bytes */
+  uint32_t                             push_pull_pos_size    = 0;   /**< pos buf size in bytes */
   void*                                agm_ap_instance;
   void*                                vaddr_dma_area;
   uint32_t                             dma_area_size;

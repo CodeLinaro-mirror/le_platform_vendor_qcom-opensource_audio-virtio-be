@@ -169,8 +169,11 @@ uint32_t AGMAudioPlugin::InitClassResource() {
     fe_dai_session_id_map_[iter.name].session_config.sess_mode = AGM_SESSION_DEFAULT;
     fe_dai_session_id_map_[iter.name].session_config.data_mode = AGM_DATA_EXTERN_MEM;
     fe_dai_session_id_map_[iter.name].push_pull_data_gvm_fd = -1;
-    fe_dai_session_id_map_[iter.name].push_pull_data_gvm_fd = -1;
     fe_dai_session_id_map_[iter.name].push_pull_pos_gvm_fd = -1;
+    fe_dai_session_id_map_[iter.name].push_pull_data_pvm_fd = -1;
+    fe_dai_session_id_map_[iter.name].push_pull_pos_pvm_fd = -1;
+    fe_dai_session_id_map_[iter.name].push_pull_data_size = 0;
+    fe_dai_session_id_map_[iter.name].push_pull_pos_size = 0;
     fe_dai_session_id_map_[iter.name].agm_session_id = i++;
     fe_dai_session_id_map_[iter.name].agm_ap_instance = (void*)this;
     fe_dai_session_id_map_[iter.name].vaddr_dma_area = nullptr; /* GL need this in order to mmap GVM dma buffer */
@@ -452,6 +455,7 @@ uint32_t AGMAudioPlugin::DcWrite(const CtlElemPayload& ctl_elem_payload) {
               md_send = md_new;
               md_send_sz = md_new_sz;
             }
+
             ret = agm_session_set_metadata(agm_session_id, md_send_sz, (uint8_t *)md_send);
             AUDIO_BASE_LOG(BASE_LOG_INFO, MODULE_VIO_AUD_DEV, "ret agm_session_set_metadata %x", ret);
             // Free ONLY if we allocated
@@ -543,6 +547,7 @@ uint32_t AGMAudioPlugin::DcWrite(const CtlElemPayload& ctl_elem_payload) {
             AUDIO_BASE_LOG(BASE_LOG_INFO, MODULE_VIO_AUD_DEV, "DcWrite metadata mixer payload size %d", ctl_elem_payload.value.tlv_data.tlv_size);
             pMetadata = (uint32_t*) ctl_elem_payload.value.tlv_data.tlv;
             pMetadataSize = ctl_elem_payload.value.tlv_data.tlv_size;
+
             ret = agm_aif_set_metadata(aif_id, pMetadataSize, (uint8_t *)pMetadata);
             AUDIO_BASE_LOG(BASE_LOG_INFO, MODULE_VIO_AUD_DEV, "ret agm_aif_set_metadata %x", ret);
             break;
@@ -664,9 +669,47 @@ int AGMAudioPlugin::DcRead(CtlElemPayload& ctl_elem_payload) {
         case GET_PARAM:
             // handle GET_PARAM
             break;
-        case GET_BUF_INFO:
-            // handle GET_BUF_INFO
+        case GET_BUF_INFO: {
+            /* Return the GVM-side fds and buffer sizes to GVM PAL.
+             * GVM PAL uses these fds to mmap() the shared buffers and
+             * establish the zero-copy data path to the DSP. */
+            if (ctl_elem_payload.value.tlv_data.tlv_size < sizeof(struct MmapBufInfo)) {
+                AUDIO_BASE_LOG(BASE_LOG_ERROR, MODULE_VIO_AUD_DEV,
+                    "GET_BUF_INFO: tlv too small %u < %zu",
+                    ctl_elem_payload.value.tlv_data.tlv_size, sizeof(struct MmapBufInfo));
+                rc = IAUD_EINVAL;
+                break;
+            }
+            struct MmapBufInfo *buf_info =
+                reinterpret_cast<struct MmapBufInfo *>(ctl_elem_payload.value.tlv_data.tlv);
+            if (buf_info == nullptr) {
+                AUDIO_BASE_LOG(BASE_LOG_ERROR, MODULE_VIO_AUD_DEV,
+                    "GET_BUF_INFO: null buf_info pointer");
+                rc = IAUD_EINVAL;
+                break;
+            }
+            if (fe_dai_session_id_map_[dai_name].push_pull_data_gvm_fd < 0 ||
+                fe_dai_session_id_map_[dai_name].push_pull_pos_gvm_fd < 0) {
+                AUDIO_BASE_LOG(BASE_LOG_ERROR, MODULE_VIO_AUD_DEV,
+                    "GET_BUF_INFO: fds not ready (StreamMmap not called), fe=%s",
+                    dai_name.c_str());
+                rc = IAUD_EINVAL;
+                break;
+            }
+            buf_info->data_buf_fd   = fe_dai_session_id_map_[dai_name].push_pull_data_gvm_fd;
+            buf_info->pos_buf_fd    = fe_dai_session_id_map_[dai_name].push_pull_pos_gvm_fd;
+            buf_info->data_buf_size = static_cast<int32_t>(
+                fe_dai_session_id_map_[dai_name].push_pull_data_size);
+            buf_info->pos_buf_size  = static_cast<int32_t>(
+                fe_dai_session_id_map_[dai_name].push_pull_pos_size);
+            AUDIO_BASE_LOG(BASE_LOG_INFO, MODULE_VIO_AUD_DEV,
+                "GET_BUF_INFO: fe=%s data_gvm_fd=%d pos_gvm_fd=%d "
+                "data_size=%d pos_size=%d",
+                dai_name.c_str(),
+                buf_info->data_buf_fd, buf_info->pos_buf_fd,
+                buf_info->data_buf_size, buf_info->pos_buf_size);
             break;
+        }
         case BUF_TIMESTAMP:
             // handle BUF_TIMESTAMP
             timestamp = (uint64_t *)ctl_elem_payload.value.bytes.data;
@@ -705,6 +748,15 @@ uint32_t AGMAudioPlugin::StreamSetParam(std::string fe_dai_name, PCMSetParams& s
     fe_dai_session_id_map_[fe_dai_name].media_config.channels = set_param_payload.channels;
     fe_dai_session_id_map_[fe_dai_name].media_config.format = virtio2agm_fmt_map.at(set_param_payload.format);
     fe_dai_session_id_map_[fe_dai_name].media_config.data_format = AGM_DATA_FORMAT_FIXED_POINT; /* need to look into this*/
+
+    /* For mmap (aaudio) use case, switch to EXTERN_PUSH_PULL mode.
+     * The actual data/pos buf fds will be provided later via StreamMmap()
+     * and passed to GSL during configure_buffer_params() at PREPARE time. */
+    if (set_param_payload.is_mmap_noirq) {
+        fe_dai_session_id_map_[fe_dai_name].session_config.data_mode = AGM_DATA_EXTERN_PUSH_PULL;
+        AUDIO_BASE_LOG(BASE_LOG_INFO, MODULE_VIO_AUD_DEV,
+            "StreamSetParam: mmap mode detected, data_mode set to AGM_DATA_EXTERN_PUSH_PULL");
+    }
 
     ret = agm_session_set_config(  fe_dai_session_id_map_[fe_dai_name].agm_handle,
                                     &fe_dai_session_id_map_[fe_dai_name].session_config,
@@ -754,6 +806,32 @@ uint32_t AGMAudioPlugin::StreamPrepare(std::string fe_dai_name) {
       return IAUD_EINVAL;
     }
 
+    /* For EXTERN_PUSH_PULL (MMAP/AAudio) mode, pass shared buffer fds to AGM before prepare */
+    if (fe_dai_session_id_map_[fe_dai_name].session_config.data_mode == AGM_DATA_EXTERN_PUSH_PULL) {
+        if (fe_dai_session_id_map_[fe_dai_name].push_pull_data_pvm_fd < 0 ||
+            fe_dai_session_id_map_[fe_dai_name].push_pull_pos_pvm_fd < 0) {
+            AUDIO_BASE_LOG(BASE_LOG_ERROR, MODULE_VIO_AUD_DEV,
+                "StreamPrepare: EXTERN_PUSH_PULL but pvm fds not ready (StreamMmap not called)");
+            return IAUD_EINVAL;
+        }
+        struct agm_buf_info buf_info = {};
+        buf_info.data_buf_fd   = fe_dai_session_id_map_[fe_dai_name].push_pull_data_pvm_fd;
+        buf_info.data_buf_size = fe_dai_session_id_map_[fe_dai_name].push_pull_data_size;
+        buf_info.pos_buf_fd    = fe_dai_session_id_map_[fe_dai_name].push_pull_pos_pvm_fd;
+        buf_info.pos_buf_size  = fe_dai_session_id_map_[fe_dai_name].push_pull_pos_size;
+        ret = agm_session_set_buf_info(fe_dai_session_id_map_[fe_dai_name].agm_session_id,
+                                       &buf_info, DATA_BUF | POS_BUF);
+        AUDIO_BASE_LOG(BASE_LOG_INFO, MODULE_VIO_AUD_DEV,
+            "StreamPrepare: agm_session_set_buf_info data_fd=%d pos_fd=%d ret=%d",
+            buf_info.data_buf_fd, buf_info.pos_buf_fd, ret);
+        if (ret) {
+            AUDIO_BASE_LOG(BASE_LOG_ERROR, MODULE_VIO_AUD_DEV,
+                "StreamPrepare: agm_session_set_buf_info failed ret=%d", ret);
+            return IAUD_EINVAL;
+        }
+    }
+
+
     ret = agm_session_prepare(agm_handle);
     if (ret)
         AUDIO_BASE_LOG(BASE_LOG_ERROR, MODULE_VIO_AUD_DEV,"agm_session_prepare failed ret %d", ret);
@@ -781,6 +859,11 @@ uint32_t AGMAudioPlugin::StreamRelease(std::string fe_dai_name) {
     sess.be_dai_name = "ZERO";
     sess.push_pull_data_gvm_fd = -1;
     sess.push_pull_pos_gvm_fd = -1;
+    sess.push_pull_data_pvm_fd = -1;
+    sess.push_pull_pos_pvm_fd  = -1;
+    sess.push_pull_data_size   = 0;
+    sess.push_pull_pos_size    = 0;
+    sess.session_config.data_mode = AGM_DATA_EXTERN_MEM;
     memset(&sess.media_config, 0, sizeof(agm_media_config));
     memset(&sess.buffer_config, 0, sizeof(agm_buffer_config));
     /*GL unmap dma area*/
@@ -924,8 +1007,33 @@ uint32_t AGMAudioPlugin::StreamRead(struct virtio_snd_pcm_buf_msg& msg) {
 }
 
 uint32_t AGMAudioPlugin::StreamMmap(std::string fe_dai_name, PCMMmapParams& msg) {
-    std::cout << "StreamMmap not supported in AGM\n";
-    return 0;
+    if (fe_dai_session_id_map_.find(fe_dai_name) == fe_dai_session_id_map_.end()) {
+        AUDIO_BASE_LOG(BASE_LOG_ERROR, MODULE_VIO_AUD_DEV,
+            "StreamMmap: unknown fe_dai_name %s", fe_dai_name.c_str());
+        return IAUD_EINVAL;
+    }
+
+    AGMsession &sess = fe_dai_session_id_map_[fe_dai_name];
+
+    /* Store PVM-side fds — these will be passed to AGM/GSL at configure_buffer_params() time */
+    sess.push_pull_data_pvm_fd = static_cast<int>(msg.data_fd);
+    sess.push_pull_pos_pvm_fd  = static_cast<int>(msg.pos_fd);
+    /* Store GVM-side fds — returned to GVM PAL via DcRead(getBufInfo) */
+    sess.push_pull_data_gvm_fd = static_cast<int>(msg.data_gvm_fd);
+    sess.push_pull_pos_gvm_fd  = static_cast<int>(msg.pos_gvm_fd);
+    /* Store sizes — also returned via getBufInfo */
+    sess.push_pull_data_size   = msg.data_size;
+    sess.push_pull_pos_size    = msg.pos_size;
+
+    AUDIO_BASE_LOG(BASE_LOG_INFO, MODULE_VIO_AUD_DEV,
+        "StreamMmap: fe=%s data_pvm_fd=%d pos_pvm_fd=%d data_gvm_fd=%d pos_gvm_fd=%d "
+        "data_size=%u pos_size=%u",
+        fe_dai_name.c_str(),
+        sess.push_pull_data_pvm_fd, sess.push_pull_pos_pvm_fd,
+        sess.push_pull_data_gvm_fd, sess.push_pull_pos_gvm_fd,
+        sess.push_pull_data_size,   sess.push_pull_pos_size);
+
+    return IAUD_EOK;
 }
 
 void AGMAudioPlugin::ClearSessionInfo()
