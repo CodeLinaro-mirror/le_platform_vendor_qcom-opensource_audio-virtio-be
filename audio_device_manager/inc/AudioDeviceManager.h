@@ -3,8 +3,12 @@
  * SPDX-License-Identifier: BSD-3-Clause-Clear
  */
 
+#ifndef AUDIO_DEVICE_MANAGER_H_
+#define AUDIO_DEVICE_MANAGER_H_
+
 #include "audio_plugin_interface.h"
 #include "ISoundCardInfoUtil.h"
+#include "adm_service_type.h"
 #include "hab_interface.h"
 #include "virtio_snd.h"
 #include <vector>
@@ -21,13 +25,6 @@
 
 #define DEFAULT_QUEUE_BITMAP ((1 << 0) | (1 << 1) | (1 << 2) | (1 << 3))
 #define MAX_PROCESSOR_CORES 4
-
-// ADM Service Type Enumeration
-typedef enum {
-    ADM_TYPE_UNINITIALIZED = -1,
-    ADM_TYPE_AWE = 0,
-    ADM_TYPE_AR = 1
-} ADMServiceType;
 
 // Global variable declaration
 extern ADMServiceType g_adm_service_type;
@@ -179,3 +176,5 @@ class AudioDeviceManager {
         std::mutex vcid_map_mutex;
         std::mutex snd_card_init_mutex;
 };
+
+#endif  // AUDIO_DEVICE_MANAGER_H_

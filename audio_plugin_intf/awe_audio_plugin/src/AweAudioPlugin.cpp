@@ -1047,7 +1047,7 @@ uint32_t AweAudioPlugin::DcWrite(const CtlElemPayload &ctl_elem_payload)
     switch (mixCtl->ctrl_mode) {
         case NAMED_CONTROL: {
             AWE_LOGI("Set named control command: %s ", ctl_elem_payload.name.c_str());
-            ret = AweSetNamedControl(AweCtrl, ctl_elem_payload, mixCtl->awe_ctl_type);
+            ret = AweSetNamedControl(AweCtrl, ctl_elem_payload, static_cast<awe_control_type_t>(mixCtl->plugin_ctl_type));
             break;
         }
         case STATIC_CONTROL_NODSP: {
@@ -1064,10 +1064,10 @@ uint32_t AweAudioPlugin::DcWrite(const CtlElemPayload &ctl_elem_payload)
                 }
             } else if (!strncmp(ctl_elem_payload.name.c_str(), "ShmemMap", strlen("ShmemMap"))) {
                 AWE_LOGD("AWE MapSMMU");
-                ret = AweShmemMapSMMU(AweCtrl, mixCtl->awe_ctl_type);
+                ret = AweShmemMapSMMU(AweCtrl, static_cast<awe_control_type_t>(mixCtl->plugin_ctl_type));
             } else if (!strncmp(ctl_elem_payload.name.c_str(), "ShmemUnmap", strlen("ShmemUnmap"))) {
                 AWE_LOGD("AWE UnmapSMMU");
-                ret = AweShmemUnMapSMMU(AweCtrl, mixCtl->awe_ctl_type);
+                ret = AweShmemUnMapSMMU(AweCtrl, static_cast<awe_control_type_t>(mixCtl->plugin_ctl_type));
             }
             break;
         }
@@ -1136,7 +1136,7 @@ int AweAudioPlugin::DcRead(struct CtlElemPayload &ctl_elem_payload)
     switch (mixCtl->ctrl_mode) {
         case NAMED_CONTROL: {
             AWE_LOGD("Get named control command: %s ", ctl_elem_payload.name.c_str());
-            ret = AweGetNamedControl(AweCtrl, ctl_elem_payload, mixCtl->awe_ctl_type);
+            ret = AweGetNamedControl(AweCtrl, ctl_elem_payload, static_cast<awe_control_type_t>(mixCtl->plugin_ctl_type));
             break;
         }
         case STATIC_CONTROL_NODSP: {
@@ -2123,3 +2123,30 @@ void AweAudioPlugin::RegisterPcmMsgCallbackFunc(std::function<void(std::string &
     AWE_LOGD("RegisterPcmMsgCallbackFunc");
     global_cb_func_ = cb_func;
 }
+
+extern "C" {
+
+/*
+ *
+ * createAweAudioPlugin / destroyAweAudioPlugin use C linkage (no name
+ * mangling) so that the caller can locate them via dlsym().  However,
+ * their signatures contain C++ STL types (std::vector).  This is safe
+ * only when the caller and this DSO are compiled with the same C++ ABI
+ * and linked against the same STL implementation (e.g. both using
+ * libc++ from the same toolchain).  If either side is ever built with a
+ * different toolchain or STL variant, the std::vector layout may differ
+ * and the call will produce undefined behaviour.  Keep caller and callee
+ * in sync.
+ */
+IAudioPlugin* createAweAudioPlugin(std::vector<FrontendInfo>* all_fe_dai,
+                                    std::vector<SoundCardMixerCtl>* all_mixer_ctl)
+{
+    return new AweAudioPlugin(all_fe_dai, all_mixer_ctl);
+}
+
+void destroyAweAudioPlugin(IAudioPlugin* plugin)
+{
+    delete plugin;
+}
+
+} // extern "C"
