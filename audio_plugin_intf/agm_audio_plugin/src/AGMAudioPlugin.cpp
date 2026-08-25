@@ -487,13 +487,31 @@ uint32_t AGMAudioPlugin::DcWrite(const CtlElemPayload& ctl_elem_payload) {
           if (ctl_val == 0){
             ret = agm_session_set_params(agm_session_id, ctl_elem_payload.value.tlv_data.tlv, ctl_elem_payload.value.tlv_data.tlv_size);
           } else {
+            /* aif_id is not carried in the setParam payload; resolve it from the
+               currently selected backend, mirroring the METADATA case. Without this
+               aif_id stays at its -1 init and reaches AGM as 0xFFFFFFFF. */
+            aif_name = fe_dai_session_id_map_[dai_name].be_dai_name;
+            if (aif_name == "ZERO")
+              aif_id = -1;
+            else
+              aif_id = be_dai_aif_id_map_.at(aif_name);
             ret = agm_session_aif_set_params(agm_session_id, aif_id, ctl_elem_payload.value.tlv_data.tlv, ctl_elem_payload.value.tlv_data.tlv_size);
           }
           break;
       case SET_PARAM_TAG:
+          aif_name = fe_dai_session_id_map_[dai_name].be_dai_name;
+          if (aif_name == "ZERO")
+            aif_id = -1;
+          else
+            aif_id = be_dai_aif_id_map_.at(aif_name);
           ret = agm_set_params_with_tag(agm_session_id, aif_id, (struct agm_tag_config *)ctl_elem_payload.value.tlv_data.tlv);
           break;
       case SET_PARAM_TAG_ACDB:
+          aif_name = fe_dai_session_id_map_[dai_name].be_dai_name;
+          if (aif_name == "ZERO")
+            aif_id = -1;
+          else
+            aif_id = be_dai_aif_id_map_.at(aif_name);
           ret =  agm_set_params_with_tag_to_acdb(agm_session_id, aif_id, ctl_elem_payload.value.tlv_data.tlv, ctl_elem_payload.value.tlv_data.tlv_size);
           break;
       case EVENT:
