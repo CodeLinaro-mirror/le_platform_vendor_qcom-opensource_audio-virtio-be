@@ -366,7 +366,7 @@ void AudioDeviceManager::CtlQueueFunc(struct SocketInfo sock_info)
         {
             struct virtio_snd_hdr *hdr = (struct virtio_snd_hdr*) buff;
             buff_size = ProcessCtlMsg(buff, buff_size, sock_info);
-            AUDIO_BASE_LOG(BASE_LOG_INFO, MODULE_VIO_AUD_DEV, "Sending response to virtio-snd, size: %d", buff_size);
+            AUDIO_BASE_LOG(BASE_LOG_DEBUG, MODULE_VIO_AUD_DEV, "Sending response to virtio-snd, size: %d", buff_size);
             ret = ihab_->Send(sock_info.vcid, buff, buff_size, 0);
             if(ret)
             {
@@ -608,7 +608,7 @@ uint32_t AudioDeviceManager::ProcessCtlMsg(void *buff, uint32_t buff_size, struc
         return buff_size;
     }
 
-    AUDIO_BASE_LOG(BASE_LOG_INFO, MODULE_VIO_AUD_DEV, "ProcessCtlMsg code: %x", hdr->code);
+    AUDIO_BASE_LOG(BASE_LOG_DEBUG, MODULE_VIO_AUD_DEV, "ProcessCtlMsg code: 0x%0x", hdr->code);
 
     switch (hdr->code) {
         case VIRTIO_SND_R_VERSION:
