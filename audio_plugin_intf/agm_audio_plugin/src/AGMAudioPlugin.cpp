@@ -3,10 +3,12 @@
  * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
  * SPDX-License-Identifier: BSD-3-Clause-Clear
  */
+#include <errno.h>
 #include "AGMAudioPlugin.h"
 #include <iostream>
 #include <sstream>
 #include "plat_dmabuf.h" //GL temp as we need to mmap gvm buffer
+
 
 #define IAUD_EOK                                  0
 #define IAUD_EFAILED                              1
@@ -505,6 +507,14 @@ uint32_t AGMAudioPlugin::DcWrite(const CtlElemPayload& ctl_elem_payload) {
           else
             aif_id = be_dai_aif_id_map_.at(aif_name);
           ret = agm_set_params_with_tag(agm_session_id, aif_id, (struct agm_tag_config *)ctl_elem_payload.value.tlv_data.tlv);
+          /* The LA-GVM virtio graph's ACDB currently has no TKV entry for these
+             mute/pause controls, so AGM returns -ENODEV. Treat it as a no-op to
+             prevent stream teardown.*/
+          if (ret == -ENODEV) {
+            AUDIO_BASE_LOG(BASE_LOG_INFO, MODULE_VIO_AUD_DEV,
+                "SET_PARAM_TAG: no tag data in ACDB (ret %d), treating as no-op", ret);
+            ret = 0;
+          }
           break;
       case SET_PARAM_TAG_ACDB:
           aif_name = fe_dai_session_id_map_[dai_name].be_dai_name;
@@ -513,6 +523,11 @@ uint32_t AGMAudioPlugin::DcWrite(const CtlElemPayload& ctl_elem_payload) {
           else
             aif_id = be_dai_aif_id_map_.at(aif_name);
           ret =  agm_set_params_with_tag_to_acdb(agm_session_id, aif_id, ctl_elem_payload.value.tlv_data.tlv, ctl_elem_payload.value.tlv_data.tlv_size);
+          if (ret == -ENODEV) {
+            AUDIO_BASE_LOG(BASE_LOG_INFO, MODULE_VIO_AUD_DEV,
+                "SET_PARAM_TAG_ACDB: no tag data in ACDB (ret %d), treating as no-op", ret);
+            ret = 0;
+          }
           break;
       case EVENT:
           // Handle EVENT
