@@ -64,7 +64,7 @@
     <device_profile>
         <in-device>
             <id>PAL_DEVICE_IN_HANDSET_MIC</id>
-            <back_end_name>TDM-LPAIF_RXTX-TX-PRIMARY</back_end_name>
+            <back_end_name>QAIF-QAIF_AUD-TX-8</back_end_name>
             <max_channels>32</max_channels>
             <channels>32</channels>
             <samplerate>48000</samplerate>
@@ -177,7 +177,7 @@
         </in-device>
         <in-device>
             <id>PAL_DEVICE_IN_BLUETOOTH_SCO_HEADSET</id>
-            <back_end_name>TDM-LPAIF_AUD-TX-PRIMARY</back_end_name>
+            <back_end_name>QAIF-QAIF_AUD-TX-2</back_end_name>
             <max_channels>8</max_channels>
             <channels>8</channels>
             <samplerate>48000</samplerate>
@@ -377,7 +377,7 @@
         </in-device>
         <in-device>
             <id>PAL_DEVICE_IN_BLUETOOTH_SCO_HEADSET</id>
-            <back_end_name>TDM-LPAIF_AUD-TX-PRIMARY</back_end_name>
+            <back_end_name>QAIF-QAIF_AUD-TX-2</back_end_name>
             <max_channels>8</max_channels>
             <channels>8</channels>
             <snd_device_name>bt-a2dp</snd_device_name>
@@ -543,7 +543,7 @@
         </in-device>
         <in-device>
             <id>PAL_DEVICE_IN_HFP_DOWNLINK</id>
-            <back_end_name>TDM-LPAIF_AUD-TX-PRIMARY</back_end_name>
+            <back_end_name>QAIF-QAIF_AUD-TX-2</back_end_name>
             <max_channels>8</max_channels>
             <channels>8</channels>
             <snd_device_name>hfp-downlink</snd_device_name>
@@ -569,7 +569,7 @@
         <out-device>
             <id>PAL_DEVICE_OUT_SPEAKER</id>
             <!--A2B-SPEAKER-->
-            <back_end_name>TDM-LPAIF_RXTX-RX-PRIMARY</back_end_name>
+            <back_end_name>QAIF-QAIF_AUD-RX-8</back_end_name>
             <max_channels>32</max_channels>
             <samplerate>48000</samplerate>
             <bit_width>16</bit_width>
@@ -597,7 +597,7 @@
         </out-device>
         <out-device>PAL_DEVICE_OUT_BLUETOOTH_SCO
             <id>PAL_DEVICE_OUT_BLUETOOTH_SCO</id>
-            <back_end_name>TDM-LPAIF_AUD-RX-PRIMARY</back_end_name>
+            <back_end_name>QAIF-QAIF_AUD-RX-2</back_end_name>
             <max_channels>8</max_channels>
             <channels>8</channels>
             <snd_device_name>bt-a2dp</snd_device_name>
@@ -712,7 +712,7 @@
         </out-device>
         <out-device>
             <id>PAL_DEVICE_OUT_BLUETOOTH_SCO</id>
-            <back_end_name>TDM-LPAIF_AUD-RX-PRIMARY</back_end_name>
+            <back_end_name>QAIF-QAIF_AUD-RX-2</back_end_name>
             <max_channels>8</max_channels>
             <channels>8</channels>
             <snd_device_name>bt-a2dp</snd_device_name>
@@ -761,7 +761,7 @@
         </out-device>
         <out-device>
             <id>PAL_DEVICE_OUT_HFP_UPLINK</id>
-            <back_end_name>TDM-LPAIF_AUD-RX-PRIMARY</back_end_name>
+            <back_end_name>QAIF-QAIF_AUD-RX-2</back_end_name>
             <max_channels>8</max_channels>
             <channels>8</channels>
             <snd_device_name>hfp-uplink</snd_device_name>

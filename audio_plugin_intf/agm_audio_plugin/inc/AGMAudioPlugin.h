@@ -7,6 +7,7 @@
 
 #include "audio_plugin_interface.h"
 #include <mutex>
+#include <memory>
 #include <optional>
 #include "agm/agm_api.h"
 #include "audio_log_util.h"
@@ -32,6 +33,9 @@ struct AGMsession {
   void*                                vaddr_dma_area;
   uint32_t                             dma_area_size;
   std::mutex                           stream_mutex;
+  /* cached metadata for NO_HOST session */
+  std::vector<uint8_t>                 sess_meta_cache;
+  std::vector<uint8_t>                 aif_meta_cache;
 };
 
 enum ControlType {
@@ -57,6 +61,18 @@ enum ControlType {
     DATAPATH_PARAMS,
     FLUSH,
     INVALID = 0xFFFF
+};
+
+struct LoopbackSession {
+    AGMsession *agm = nullptr;
+    string tx_name;
+    string rx_name;
+    uint32_t tx_aif_id = -1;
+    uint32_t rx_aif_id = -1;
+    bool tx_started = false;
+    bool rx_started = false;
+    bool tx_released = false;
+    bool rx_released = false;
 };
 
 class AGMAudioPlugin : public IAudioPlugin {
@@ -92,6 +108,9 @@ public:
   unordered_map<string, uint32_t> be_dai_aif_id_map_;
     // control_id is the vector index
   vector<MixerCtlInfo> *all_mixer_ctl_info_;
+
+  // map to quickly look up loopback session
+  unordered_map<string, std::shared_ptr<LoopbackSession>> loopback_sessions_;
 private:
       static void SSRCallbackFunc(enum agm_ssr_event_type event_type, void *client_data);
       std::function<void(enum SSRState)> adm_ssr_cb;
