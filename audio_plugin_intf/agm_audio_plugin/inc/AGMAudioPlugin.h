@@ -6,6 +6,8 @@
 #define AGMAUDIOPLUGIN_H_
 
 #include "audio_plugin_interface.h"
+#include <mutex>
+#include <memory>
 #include <optional>
 #include "agm/agm_api.h"
 #include "audio_log_util.h"
@@ -20,11 +22,20 @@ struct AGMsession {
   struct agm_buffer_config             buffer_config;
   struct agm_media_config              media_config;
   struct agm_session_config            session_config;
-  int                                  push_pull_data_gvm_fd = -1;
-  int                                  push_pull_pos_gvm_fd = -1;
+  /* mmap (EXTERN_PUSH_PULL) fields */
+  int                                  push_pull_data_gvm_fd = -1;  /**< GVM-side fd, returned via getBufInfo */
+  int                                  push_pull_pos_gvm_fd  = -1;  /**< GVM-side fd, returned via getBufInfo */
+  int                                  push_pull_data_pvm_fd = -1;  /**< PVM-side fd, passed to AGM/GSL */
+  int                                  push_pull_pos_pvm_fd  = -1;  /**< PVM-side fd, passed to AGM/GSL */
+  uint32_t                             push_pull_data_size   = 0;   /**< data buf size in bytes */
+  uint32_t                             push_pull_pos_size    = 0;   /**< pos buf size in bytes */
   void*                                agm_ap_instance;
   void*                                vaddr_dma_area;
   uint32_t                             dma_area_size;
+  std::mutex                           stream_mutex;
+  /* cached metadata for NO_HOST session */
+  std::vector<uint8_t>                 sess_meta_cache;
+  std::vector<uint8_t>                 aif_meta_cache;
 };
 
 enum ControlType {
@@ -50,6 +61,18 @@ enum ControlType {
     DATAPATH_PARAMS,
     FLUSH,
     INVALID = 0xFFFF
+};
+
+struct LoopbackSession {
+    AGMsession *agm = nullptr;
+    string tx_name;
+    string rx_name;
+    uint32_t tx_aif_id = -1;
+    uint32_t rx_aif_id = -1;
+    bool tx_started = false;
+    bool rx_started = false;
+    bool tx_released = false;
+    bool rx_released = false;
 };
 
 class AGMAudioPlugin : public IAudioPlugin {
@@ -85,7 +108,13 @@ public:
   unordered_map<string, uint32_t> be_dai_aif_id_map_;
     // control_id is the vector index
   vector<MixerCtlInfo> *all_mixer_ctl_info_;
+
+  // map to quickly look up loopback session
+  unordered_map<string, std::shared_ptr<LoopbackSession>> loopback_sessions_;
 private:
+      static void SSRCallbackFunc(enum agm_ssr_event_type event_type, void *client_data);
+      std::function<void(enum SSRState)> adm_ssr_cb;
+      void ClearSessionInfo();
       ControlType stringToControlType(const std::string& str);
       void debugMetaDataPrintout(std::string typeMetadata, uint32_t* metadata, uint32_t numElements);
 };

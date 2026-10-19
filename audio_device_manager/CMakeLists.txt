@@ -50,11 +50,13 @@ set(ADM_SOCKET_INTF_HEADERS
 # under unit test environment
 #add_definitions(-DUNIT_TEST)
 
-if ("${ENABLE_TARGET}" STREQUAL "sa8797")
-    add_definitions(-DENABLE_RT_THREAD_PCMMSG)
-    add_definitions(-DCOMPRESMGR_CPU_COMPONENT_NAME="audio")
-    add_definitions(-DCOMPRESMGR_CPU_THREAD_GRP_NAME="adm_pcmmsg")
-endif()
+add_definitions(-DCOMPRESMGR_CPU_COMPONENT_NAME="audio")
+add_definitions(-DCOMPRESMGR_CPU_THREAD_PCM_MSG="adm_pcmmsg")
+add_definitions(-DCOMPRESMGR_CPU_THREAD_CTLQ="adm_ctlq")
+add_definitions(-DCOMPRESMGR_CPU_THREAD_EVTQ="adm_eventq")
+add_definitions(-DCOMPRESMGR_CPU_THREAD_PCMQ_CP="adm_pcmq_cp")
+add_definitions(-DCOMPRESMGR_CPU_THREAD_PCMQ_PB="adm_pcmq_pb")
+add_definitions(-DENABLE_FLEXIBLE_THREAD_POLICY_PRIORITY)
 
 ################################################################################
 # Project meta
@@ -77,9 +79,7 @@ ${ADM_SOCKET_INTF_HEADERS}
 
 include_directories(${ADM_HEADERS_DIR} ${ADM_SOCKET_INTF_HEADERS_DIR})
 target_link_libraries(${ADM_PROJECT_NAME} PRIVATE pthread glib-2.0 cutils uhab audio_log_util dl)
-if ("${ENABLE_TARGET}" STREQUAL "sa8797")
-    target_link_libraries(${ADM_PROJECT_NAME} PRIVATE compresmgr_client)
-endif()
+target_link_libraries(${ADM_PROJECT_NAME} PRIVATE compresmgr_client)
 option(ENABLE_COVERAGE "Enable code coverage reporting" OFF)
 # Define an option to enable/disable code coverage during compilation
 if(ENABLE_COVERAGE)

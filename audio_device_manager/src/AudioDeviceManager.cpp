@@ -8,14 +8,17 @@
 #include <pthread.h>
 #include <sys/mman.h>
 
-#ifdef ENABLE_RT_THREAD_PCMMSG
+#ifdef ENABLE_FLEXIBLE_THREAD_POLICY_PRIORITY
 #include "amss/compresmgr_client_api.h"
+#include <map>
+#include <sys/time.h>
+#include <sys/resource.h>
+#include <unistd.h>
+#include <errno.h>
 #endif
 
 #include "AudioDeviceManager.h"
 
-#define RT_THREAD_PCMMSG_DEFAULT_POLICY SCHED_FIFO
-#define RT_THREAD_PCMMSG_DEFAULT_PRIORITY 45
 #define STOP_TIMEOUT_MS 1000
 #define CORE_ERROR 25
 #define SLEEP_US(us) do { \
@@ -28,6 +31,98 @@
 extern ADMServiceType g_adm_service_type;
 
 using namespace std::placeholders;
+
+#ifdef ENABLE_FLEXIBLE_THREAD_POLICY_PRIORITY
+// <threadName, <policy, priority>>
+static std::map<std::string, std::pair<int32_t, int32_t>> threadPolicyMap = {
+    {COMPRESMGR_CPU_THREAD_PCM_MSG, {SCHED_FIFO, 45}},
+    {COMPRESMGR_CPU_THREAD_CTLQ, {SCHED_OTHER, 0}},
+    {COMPRESMGR_CPU_THREAD_EVTQ, {SCHED_OTHER, 0}},
+    {COMPRESMGR_CPU_THREAD_PCMQ_PB, {SCHED_OTHER, 0}},
+    {COMPRESMGR_CPU_THREAD_PCMQ_CP, {SCHED_OTHER, 0}},
+};
+
+static void initCompresCPUConfig()
+{
+    constexpr uint32_t kSkipPolicy = 1U << 0;
+    constexpr uint32_t kSkipPriority = 1U << 1;
+    CPUConfigReq_t cpu_config_req = {COMPRESMGR_CPU_COMPONENT_NAME, 0};
+    CPUConfigResp_t cpu_config_resp = {0};
+    cpu_config_req.version = CPU_CONFIG_API_REQ_VERSION;
+    cpu_config_resp.version = CPU_CONFIG_API_RESP_VERSION;
+
+    for (auto &tpolicy : threadPolicyMap) {
+        strlcpy(cpu_config_req.thrdGrpName, tpolicy.first.c_str(), THRD_NAME_LENGTH);
+        CompResmgrRet_e ret = CompResmgrGetCPUConfig(&cpu_config_req, &cpu_config_resp);
+
+        if (ret == COMPRESMGR_RET_SUCCESS) {
+            if (!(cpu_config_resp.config_skipbits & kSkipPolicy)) {
+                tpolicy.second.first = cpu_config_resp.schedPolicy;
+            }
+            if (!(cpu_config_resp.config_skipbits & kSkipPriority)) {
+                tpolicy.second.second = cpu_config_resp.priority;
+            }
+        } else {
+            AUDIO_BASE_LOG(BASE_LOG_ERROR, MODULE_VIO_AUD_DEV,
+                    "Failed to find config in compresmgr for %s, use default policy %d priority %d",
+                    cpu_config_req.thrdGrpName, tpolicy.second.first, tpolicy.second.second);
+        }
+    }
+}
+
+static void threadConfigSelf()
+{
+    char threadName[THRD_NAME_LENGTH] = {0};
+    int32_t policy = SCHED_OTHER;
+    int32_t priority = 0;
+    struct sched_param param = {0};
+
+    if (pthread_getname_np(pthread_self(), threadName, sizeof(threadName))) {
+        AUDIO_BASE_LOG(BASE_LOG_ERROR, MODULE_VIO_AUD_DEV,
+                "Failed to get thread name for tid %d", gettid());
+        return;
+    }
+
+    auto itr = threadPolicyMap.find(std::string(threadName));
+    if (itr == threadPolicyMap.end()) {
+        AUDIO_BASE_LOG(BASE_LOG_ERROR, MODULE_VIO_AUD_DEV,
+                "Failed to find config in map for %s", threadName);
+        return;
+    }
+
+    policy = itr->second.first;
+    priority = itr->second.second;
+    if (policy == SCHED_OTHER) {
+        param.sched_priority = 0;
+        int ret = pthread_setschedparam(pthread_self(), policy, &param);
+        if (ret) {
+            AUDIO_BASE_LOG(BASE_LOG_ERROR, MODULE_VIO_AUD_DEV,
+                    "Failed to set policy TS for thread %s, ERROR %d - %s",
+                    threadName, ret, strerror(ret));
+            return;
+        }
+
+        if (setpriority(PRIO_PROCESS, gettid(), priority)) {
+            AUDIO_BASE_LOG(BASE_LOG_ERROR, MODULE_VIO_AUD_DEV,
+                    "Failed to set priority %d for TS thread %s, ERROR %d - %s",
+                    priority, threadName, errno, strerror(errno));
+            return;
+        }
+    } else {
+        param.sched_priority = priority;
+        int ret = pthread_setschedparam(pthread_self(), policy, &param);
+        if (ret) {
+            AUDIO_BASE_LOG(BASE_LOG_ERROR, MODULE_VIO_AUD_DEV,
+                    "Failed to set policy %d and priority %d for thread %s, ERROR %d - %s",
+                    policy, priority, threadName, ret, strerror(ret));
+            return;
+        }
+    }
+
+    AUDIO_BASE_LOG(BASE_LOG_INFO, MODULE_VIO_AUD_DEV,
+            "Set policy %d and priority %d for thread %s", policy, priority, threadName);
+}
+#endif
 
 AudioDeviceManager::AudioDeviceManager(
         IAudioPlugin *iaudio_plugin,
@@ -49,6 +144,10 @@ AudioDeviceManager::AudioDeviceManager(
 
 void AudioDeviceManager::launch()
 {
+#ifdef ENABLE_FLEXIBLE_THREAD_POLICY_PRIORITY
+    initCompresCPUConfig();
+#endif
+
     for (int i = MM_AUD_1; i <= MM_AUD_4; i++)
     {
     // check if bit is set for the queue
@@ -154,9 +253,11 @@ void AudioDeviceManager::OpenCommChannel(uint32_t mmid)
         struct SocketInfo sock_info = {0};
         std::function<void(struct SocketInfo)> thread_func;
         std::thread thread_obj;
+#ifndef ENABLE_FLEXIBLE_THREAD_POLICY_PRIORITY
         unsigned int thread_priority = 10;
         int policy;
         sched_param thread_params;
+#endif
 
         AUDIO_BASE_LOG(BASE_LOG_INFO, MODULE_VIO_AUD_DEV, "Calling HAB open for mmid %d", mmid);
         ret = ihab_->Open(&sock_info.vcid, mmid, -1, 0);
@@ -239,16 +340,20 @@ void AudioDeviceManager::OpenCommChannel(uint32_t mmid)
 #else
                 thread_func = std::bind(&AudioDeviceManager::PCMQueueFunc, this, _1);
 #endif
+#ifndef ENABLE_FLEXIBLE_THREAD_POLICY_PRIORITY
                 thread_priority = 0;
+#endif
                 break;
         }
         thread_obj = std::thread(thread_func, sock_info);
+#ifndef ENABLE_FLEXIBLE_THREAD_POLICY_PRIORITY
         int ret_val = pthread_getschedparam(thread_obj.native_handle(), &policy, &thread_params);
         if (ret_val != 0) {
             AUDIO_BASE_LOG(BASE_LOG_ERROR, MODULE_VIO_AUD_DEV, "Failed to set thread priority: %d, policy: %d, error: %d", thread_priority, policy, ret_val);
         }
         thread_params.sched_priority = thread_priority;
         pthread_setschedparam(thread_obj.native_handle(), policy, &thread_params);
+#endif
         thread_obj.detach();
 #ifdef OFF_TARGET_UNIT_TEST
         return;
@@ -270,7 +375,12 @@ void AudioDeviceManager::CtlQueueFunc(struct SocketInfo sock_info)
         return;
     }
 
+#ifdef ENABLE_FLEXIBLE_THREAD_POLICY_PRIORITY
+    pthread_setname_np(pthread_self(), COMPRESMGR_CPU_THREAD_CTLQ);
+    threadConfigSelf();
+#else
     pthread_setname_np(pthread_self(), "adm_ctlq");
+#endif
 
     while (1)
     {
@@ -366,7 +476,7 @@ void AudioDeviceManager::CtlQueueFunc(struct SocketInfo sock_info)
         {
             struct virtio_snd_hdr *hdr = (struct virtio_snd_hdr*) buff;
             buff_size = ProcessCtlMsg(buff, buff_size, sock_info);
-            AUDIO_BASE_LOG(BASE_LOG_INFO, MODULE_VIO_AUD_DEV, "Sending response to virtio-snd, size: %d", buff_size);
+            AUDIO_BASE_LOG(BASE_LOG_DEBUG, MODULE_VIO_AUD_DEV, "Sending response to virtio-snd, size: %d", buff_size);
             ret = ihab_->Send(sock_info.vcid, buff, buff_size, 0);
             if(ret)
             {
@@ -390,15 +500,23 @@ void AudioDeviceManager::PCMQueueFunc(struct SocketInfo sock_info)
     int32_t ret = 0;
     uint32_t buff_size;
     uint32_t stream_id;
+    string fe_dai_name;
+
+#ifdef ENABLE_FLEXIBLE_THREAD_POLICY_PRIORITY
+    std::string threadName = sock_info.mmid == MM_AUD_3 ?
+            COMPRESMGR_CPU_THREAD_PCMQ_CP : COMPRESMGR_CPU_THREAD_PCMQ_PB;
+#else
 #if !defined(__QNX__)
     unsigned int direction = sock_info.mmid == MM_AUD_3 ? SNDRV_PCM_STREAM_CAPTURE : SNDRV_PCM_STREAM_PLAYBACK;
 #else
     unsigned int direction = sock_info.mmid == MM_AUD_3 ? VIRTIO_STREAM_CAPTURE : VIRTIO_STREAM_PLAYBACK;
 #endif
-    string fe_dai_name;
-
     std::string threadName = "adm_pcmq_" + std::to_string(direction);
+#endif
     pthread_setname_np(pthread_self(), threadName.c_str());
+#ifdef ENABLE_FLEXIBLE_THREAD_POLICY_PRIORITY
+    threadConfigSelf();
+#endif
 
     while (1)
     {
@@ -449,7 +567,7 @@ void AudioDeviceManager::PCMQueueFunc(struct SocketInfo sock_info)
                     pcm_stream_threads_[sock_info.vmid][fe_dai_name]->stream_cond.notify_one();
                 }
                 else {
-                    AUDIO_BASE_LOG(BASE_LOG_ERROR, MODULE_VIO_AUD_DEV, "Cannot find pcm thread for stream_id %d, dropping pcm msg", stream_id);
+                    AUDIO_BASE_LOG(BASE_LOG_ERROR, MODULE_VIO_AUD_DEV, "Failed to find pcm thread for stream_id %d, dropping pcm msg", stream_id);
                     DropPcmMsg(sock_info.vcid, pcm_msg);
                 }
             }
@@ -499,7 +617,12 @@ void AudioDeviceManager::EventQueueFunc(struct SocketInfo sock_info)
     ret = plugin_utils_[sock_info.vmid].pcm_plugin->RegisterSSREvent(ssr_cb_func);
     if (ret)
         AUDIO_BASE_LOG(BASE_LOG_DEBUG, MODULE_VIO_AUD_DEV, "Failed to register for SSR events");
+#ifdef ENABLE_FLEXIBLE_THREAD_POLICY_PRIORITY
+    pthread_setname_np(pthread_self(), COMPRESMGR_CPU_THREAD_EVTQ);
+    threadConfigSelf();
+#else
     pthread_setname_np(pthread_self(), "adm_eventq");
+#endif
     while (1)
     {
       ret = ihab_->Receive(sock_info.vcid, buff, &buff_size, -1, 0);
@@ -608,7 +731,7 @@ uint32_t AudioDeviceManager::ProcessCtlMsg(void *buff, uint32_t buff_size, struc
         return buff_size;
     }
 
-    AUDIO_BASE_LOG(BASE_LOG_INFO, MODULE_VIO_AUD_DEV, "ProcessCtlMsg code: %x", hdr->code);
+    AUDIO_BASE_LOG(BASE_LOG_DEBUG, MODULE_VIO_AUD_DEV, "ProcessCtlMsg code: 0x%0x", hdr->code);
 
     switch (hdr->code) {
         case VIRTIO_SND_R_VERSION:
@@ -1530,31 +1653,12 @@ response:
         }
     }
 
+#ifdef ENABLE_FLEXIBLE_THREAD_POLICY_PRIORITY
+    pthread_setname_np(pthread_self(), COMPRESMGR_CPU_THREAD_PCM_MSG);
+    threadConfigSelf();
+#else
     pthread_setname_np(pthread_self(), "adm_pcmmsg");
-
-#ifdef ENABLE_RT_THREAD_PCMMSG
-
-    pthread_setname_np(pthread_self(), COMPRESMGR_CPU_THREAD_GRP_NAME);
-
-    struct sched_param pcmmsg_sched = {0};
-    CPUConfigReq_t cpu_config_req = {COMPRESMGR_CPU_COMPONENT_NAME, COMPRESMGR_CPU_THREAD_GRP_NAME};
-    CPUConfigResp_t cpu_config_resp = {0, 0, 0};
-    CompResmgrRet_e ret_get_cpu_config = CompResmgrGetCPUConfig(&cpu_config_req, &cpu_config_resp);
-    if (ret_get_cpu_config != COMPRESMGR_RET_SUCCESS) {
-        AUDIO_BASE_LOG(BASE_LOG_ERROR, MODULE_VIO_AUD_DEV, "CompResmgrGetCPUConfig failed, using default RT config");
-        cpu_config_resp.schedPolicy = RT_THREAD_PCMMSG_DEFAULT_POLICY;
-        cpu_config_resp.priority = RT_THREAD_PCMMSG_DEFAULT_PRIORITY;
-    }
-    pcmmsg_sched.sched_priority = cpu_config_resp.priority;
-
-    ret = pthread_setschedparam(pthread_self(), cpu_config_resp.schedPolicy, &pcmmsg_sched);
-    if (ret)
-        AUDIO_BASE_LOG(BASE_LOG_ERROR, MODULE_VIO_AUD_DEV, "pthread_setschedparam failed, fall back to TS thread");
-    else
-        AUDIO_BASE_LOG(BASE_LOG_INFO, MODULE_VIO_AUD_DEV, "Set RT thread %s with policy %d and priority %d succeeded",
-                       COMPRESMGR_CPU_THREAD_GRP_NAME, cpu_config_resp.schedPolicy, pcmmsg_sched.sched_priority);
-
-#endif  // ENABLE_RT_THREAD_PCMMSG
+#endif
 
     while(1) {
         std::unique_lock<std::mutex> streams_map_lock(pcm_stream_threads_mutex);

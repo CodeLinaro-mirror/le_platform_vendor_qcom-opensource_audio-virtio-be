@@ -3,10 +3,12 @@
  * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
  * SPDX-License-Identifier: BSD-3-Clause-Clear
  */
+#include <errno.h>
 #include "AGMAudioPlugin.h"
 #include <iostream>
 #include <sstream>
 #include "plat_dmabuf.h" //GL temp as we need to mmap gvm buffer
+
 
 #define IAUD_EOK                                  0
 #define IAUD_EFAILED                              1
@@ -153,7 +155,7 @@ AGMAudioPlugin::~AGMAudioPlugin() {
 // fails, should call the destructor after this func.
 uint32_t AGMAudioPlugin::InitClassResource() {
   uint32_t rc;
-  int j = 0; /* used for assigning backend id */
+  size_t num_aif = 0;
 
   rc = agm_init();
 
@@ -166,42 +168,85 @@ uint32_t AGMAudioPlugin::InitClassResource() {
     else
         fe_dai_session_id_map_[iter.name].session_config.dir = TX;
     AUDIO_BASE_LOG(BASE_LOG_INFO, MODULE_VIO_AUD_DEV, "dai_name %s fe_dai_session_id_map_[iter.name].session_config.dir %x", fe_dai_session_id_map_[iter.name].fe_dai_name.c_str(), fe_dai_session_id_map_[iter.name].session_config.dir);
-    fe_dai_session_id_map_[iter.name].session_config.sess_mode = AGM_SESSION_DEFAULT;
+    if (iter.sess_mode == kSessModeNoHost)
+        fe_dai_session_id_map_[iter.name].session_config.sess_mode = AGM_SESSION_NO_HOST;
+    else
+        fe_dai_session_id_map_[iter.name].session_config.sess_mode = AGM_SESSION_DEFAULT;
     fe_dai_session_id_map_[iter.name].session_config.data_mode = AGM_DATA_EXTERN_MEM;
     fe_dai_session_id_map_[iter.name].push_pull_data_gvm_fd = -1;
-    fe_dai_session_id_map_[iter.name].push_pull_data_gvm_fd = -1;
     fe_dai_session_id_map_[iter.name].push_pull_pos_gvm_fd = -1;
+    fe_dai_session_id_map_[iter.name].push_pull_data_pvm_fd = -1;
+    fe_dai_session_id_map_[iter.name].push_pull_pos_pvm_fd = -1;
+    fe_dai_session_id_map_[iter.name].push_pull_data_size = 0;
+    fe_dai_session_id_map_[iter.name].push_pull_pos_size = 0;
     fe_dai_session_id_map_[iter.name].agm_session_id = i++;
     fe_dai_session_id_map_[iter.name].agm_ap_instance = (void*)this;
     fe_dai_session_id_map_[iter.name].vaddr_dma_area = nullptr; /* GL need this in order to mmap GVM dma buffer */
     fe_dai_session_id_map_[iter.name].be_dai_name = "ZERO";
   }
 
-  for (auto iter : *all_mixer_ctl_info_) {
-    // Extract the dai_name
-    std::string mixer_ctrl = iter.name.c_str();
-    std::istringstream iss(mixer_ctrl);
-
-    std::string dai_name;
-    iss >> dai_name;
-
-    if ((std::strstr(dai_name.c_str(), "TDM-")) && (be_dai_aif_id_map_.find(dai_name) == be_dai_aif_id_map_.end()))
-      be_dai_aif_id_map_[dai_name] = j++;
-
-#if 0 /* GL debug printout for mixer control mappings */
-    AUDIO_BASE_LOG(BASE_LOG_INFO, MODULE_VIO_AUD_DEV, "all_mixer_ctl_info_. %s", iter.name.c_str());
-    if (iter.enum_mapping.size() > 0){
-      for (auto it1 : iter.enum_mapping){
-        AUDIO_BASE_LOG(BASE_LOG_INFO, MODULE_VIO_AUD_DEV, "enum_mapping %s", it1.c_str());
+  /* Build be_dai_aif_id_map_ from AGM's authoritative AIF list so that
+   * the index used here matches device_get_obj()'s list order exactly. */
+  rc = agm_get_aif_info_list(nullptr, &num_aif);
+  if (rc == 0 && num_aif > 0) {
+    std::vector<struct aif_info> aif_list(num_aif);
+    rc = agm_get_aif_info_list(aif_list.data(), &num_aif);
+    if (rc == 0) {
+      for (int idx = 0; idx < num_aif; idx++) {
+        string dai_name(aif_list[idx].aif_name);
+        be_dai_aif_id_map_[dai_name] = idx;
+        AUDIO_BASE_LOG(BASE_LOG_INFO, MODULE_VIO_AUD_DEV,
+          "AIF map: [%d] %s dir=%d", idx, dai_name.c_str(), (int)aif_list[idx].dir);
       }
+      AUDIO_BASE_LOG(BASE_LOG_INFO, MODULE_VIO_AUD_DEV, "be_dai_aif_id_map_ built successful, %zu entries", num_aif);
+    } else {
+      AUDIO_BASE_LOG(BASE_LOG_ERROR, MODULE_VIO_AUD_DEV, "agm_get_aif_info_list fetch failed rc=%d", rc);
     }
-#endif
+  } else {
+    AUDIO_BASE_LOG(BASE_LOG_ERROR, MODULE_VIO_AUD_DEV, "agm_get_aif_info_list query failed rc=%d num=%zu", rc, num_aif);
   }
+
   return rc;
+}
+
+/*
+ * SSRCallbackFunc - static AGM SSR callback.
+ *
+ * On AUDIO_SVC_DN: close all open AGM sessions to unblock any blocked
+ * read/write calls, then notify the upper layer (ADM) via adm_ssr_cb.
+ * On AUDIO_SVC_UP: notify the upper layer so it can re-open sessions.
+ */
+void AGMAudioPlugin::SSRCallbackFunc(enum agm_ssr_event_type event_type,
+                                     void *client_data)
+{
+    enum SSRState ssr_state = SSR_STATE_UNKNOWN;
+    AGMAudioPlugin *agm_plug = (AGMAudioPlugin *)client_data;
+
+    switch (event_type) {
+    case AGM_SSR_EVENT_AUDIO_SVC_DN:
+        ssr_state = SSR_STATE_DOWN;
+        break;
+    case AGM_SSR_EVENT_AUDIO_SVC_UP:
+        ssr_state = SSR_STATE_UP;
+        break;
+    default:
+        AUDIO_BASE_LOG(BASE_LOG_DEBUG, MODULE_VIO_AUD_DEV,
+                       "SSRCallbackFunc: unsupported event_type %d", event_type);
+        return;
+    }
+
+    /* On DN: close all open sessions before notifying upper layer */
+    if (ssr_state == SSR_STATE_DOWN)
+        agm_plug->ClearSessionInfo();
+
+    if (agm_plug->adm_ssr_cb)
+        agm_plug->adm_ssr_cb(ssr_state);
 }
 
 // This func should be called before destructor, no return value.
 void AGMAudioPlugin::ReleaseClassResource() {
+  agm_deregister_ssr_cb(SSRCallbackFunc, (void *)this);
+
   // call agm_deinit()
   agm_deinit();
 
@@ -266,6 +311,47 @@ void eventCallback(uint32_t session_id, struct agm_event_cb_params *event_params
 
 done:
     return;
+}
+
+/*
+ * Merge two session metadata buffers (GKV format: [n, k0,v0, k1,v1, ..., tail]).
+ */
+static uint32_t *merge_metadata(uint32_t *fir_buf, uint32_t fir_buf_sz, uint32_t *sec_buf, uint32_t sec_buf_sz, uint32_t *out_sz)
+{
+    if (!fir_buf || fir_buf_sz < 4) {
+        if (!sec_buf || sec_buf_sz < 4)
+            return NULL;
+        fir_buf = sec_buf;
+        fir_buf_sz = sec_buf_sz;
+        sec_buf = nullptr;
+        sec_buf_sz = 0;
+    }
+
+    uint32_t fir_buf_words   = fir_buf_sz / 4;
+    uint32_t fir_buf_n       = fir_buf[0];
+    uint32_t fir_buf_gkv_wds = 1 + 2 * fir_buf_n;
+    if (fir_buf_gkv_wds > fir_buf_words)
+        return NULL;
+
+    uint32_t sec_buf_n = (sec_buf && sec_buf_sz >= 4) ? sec_buf[0] : 0;
+    if (sec_buf && sec_buf_sz >= 4 && (1 + 2 * sec_buf_n) > (sec_buf_sz / 4))
+        sec_buf_n = 0;
+
+    uint32_t tail_words = fir_buf_words - fir_buf_gkv_wds;
+    uint32_t new_words  = 1 + 2 * (fir_buf_n + sec_buf_n) + tail_words;
+    uint32_t *out = (uint32_t *)calloc(new_words, sizeof(uint32_t));
+    if (!out)
+        return NULL;
+
+    out[0] = fir_buf_n + sec_buf_n;
+    memcpy(out + 1, fir_buf + 1, 2 * fir_buf_n * sizeof(uint32_t));
+    if (sec_buf_n)
+        memcpy(out + 1 + 2 * fir_buf_n, sec_buf + 1, 2 * sec_buf_n * sizeof(uint32_t));
+    if (tail_words)
+        memcpy(out + 1 + 2 * (fir_buf_n + sec_buf_n), fir_buf + fir_buf_gkv_wds, tail_words * sizeof(uint32_t));
+
+    *out_sz = new_words * 4;
+    return out;
 }
 
 /*
@@ -356,11 +442,16 @@ uint32_t AGMAudioPlugin::DcWrite(const CtlElemPayload& ctl_elem_payload) {
   uint32_t pMetadataSize;
 
   if (dai_name.substr(0,3) == "PCM"){
+    if (fe_dai_session_id_map_.find(dai_name) == fe_dai_session_id_map_.end()) {
+      AUDIO_BASE_LOG(BASE_LOG_ERROR, MODULE_VIO_AUD_DEV,
+          "DcWrite: DAI %s not found in session map", dai_name.c_str());
+      return IAUD_EINVAL;
+    }
     uint32_t agm_session_id;
     agm_session_id = fe_dai_session_id_map_[dai_name].agm_session_id;
     int ctl_val = fe_dai_session_id_map_[dai_name].ctl_val_;
     string aif_name;
-    int32_t aif_id;
+    int32_t aif_id = -1;
 
     /* handle PCM*/
     switch (controlType){
@@ -411,8 +502,14 @@ uint32_t AGMAudioPlugin::DcWrite(const CtlElemPayload& ctl_elem_payload) {
               md_send = md_new;
               md_send_sz = md_new_sz;
             }
-            ret = agm_session_set_metadata(agm_session_id, md_send_sz, (uint8_t *)md_send);
-            AUDIO_BASE_LOG(BASE_LOG_INFO, MODULE_VIO_AUD_DEV, "ret agm_session_set_metadata %x", ret);
+            if (fe_dai_session_id_map_[dai_name].session_config.sess_mode == AGM_SESSION_NO_HOST) {
+                fe_dai_session_id_map_[dai_name].sess_meta_cache.assign((uint8_t *)md_send, (uint8_t *)md_send + md_send_sz);
+                AUDIO_BASE_LOG(BASE_LOG_INFO, MODULE_VIO_AUD_DEV, "METADATA: cached session_meta %u bytes for NO_HOST %s", md_send_sz, dai_name.c_str());
+            } else {
+                ret = agm_session_set_metadata(agm_session_id, md_send_sz, (uint8_t *)md_send);
+                AUDIO_BASE_LOG(BASE_LOG_INFO, MODULE_VIO_AUD_DEV, "ret agm_session_set_metadata %x", ret);
+            }
+
             // Free ONLY if we allocated
             if (md_new) {
               free(md_new);
@@ -429,9 +526,13 @@ uint32_t AGMAudioPlugin::DcWrite(const CtlElemPayload& ctl_elem_payload) {
             AUDIO_BASE_LOG(BASE_LOG_INFO, MODULE_VIO_AUD_DEV, "metadata aif_name %s aif_id %d",
               aif_name.c_str(),
               aif_id);
-
-            ret = agm_session_aif_set_metadata(agm_session_id, aif_id, pMetadataSize, (uint8_t *)pMetadata);
-             AUDIO_BASE_LOG(BASE_LOG_INFO, MODULE_VIO_AUD_DEV, "ret agm_session_aif_set_metadata %x", ret);
+            if (fe_dai_session_id_map_[dai_name].session_config.sess_mode == AGM_SESSION_NO_HOST && aif_id >= 0) {
+                fe_dai_session_id_map_[dai_name].aif_meta_cache.assign((uint8_t *)pMetadata, (uint8_t *)pMetadata + pMetadataSize);
+                AUDIO_BASE_LOG(BASE_LOG_INFO, MODULE_VIO_AUD_DEV, "METADATA: cached aif_meta %u bytes aif_id=%d for NO_HOST %s", pMetadataSize, aif_id, dai_name.c_str());
+            } else {
+                ret = agm_session_aif_set_metadata(agm_session_id, aif_id, pMetadataSize, (uint8_t *)pMetadata);
+                AUDIO_BASE_LOG(BASE_LOG_INFO, MODULE_VIO_AUD_DEV, "ret agm_session_aif_set_metadata %x", ret);
+            }
           }
           break;
         case GET_PARAM:
@@ -442,14 +543,45 @@ uint32_t AGMAudioPlugin::DcWrite(const CtlElemPayload& ctl_elem_payload) {
           if (ctl_val == 0){
             ret = agm_session_set_params(agm_session_id, ctl_elem_payload.value.tlv_data.tlv, ctl_elem_payload.value.tlv_data.tlv_size);
           } else {
+            /* aif_id is not carried in the setParam payload; resolve it from the
+               currently selected backend, mirroring the METADATA case. Without this
+               aif_id stays at its -1 init and reaches AGM as 0xFFFFFFFF. */
+            aif_name = fe_dai_session_id_map_[dai_name].be_dai_name;
+            if (aif_name == "ZERO")
+              aif_id = -1;
+            else
+              aif_id = be_dai_aif_id_map_.at(aif_name);
             ret = agm_session_aif_set_params(agm_session_id, aif_id, ctl_elem_payload.value.tlv_data.tlv, ctl_elem_payload.value.tlv_data.tlv_size);
           }
           break;
       case SET_PARAM_TAG:
+          aif_name = fe_dai_session_id_map_[dai_name].be_dai_name;
+          if (aif_name == "ZERO")
+            aif_id = -1;
+          else
+            aif_id = be_dai_aif_id_map_.at(aif_name);
           ret = agm_set_params_with_tag(agm_session_id, aif_id, (struct agm_tag_config *)ctl_elem_payload.value.tlv_data.tlv);
+          /* The LA-GVM virtio graph's ACDB currently has no TKV entry for these
+             mute/pause controls, so AGM returns -ENODEV. Treat it as a no-op to
+             prevent stream teardown.*/
+          if (ret == -ENODEV) {
+            AUDIO_BASE_LOG(BASE_LOG_INFO, MODULE_VIO_AUD_DEV,
+                "SET_PARAM_TAG: no tag data in ACDB (ret %d), treating as no-op", ret);
+            ret = 0;
+          }
           break;
       case SET_PARAM_TAG_ACDB:
+          aif_name = fe_dai_session_id_map_[dai_name].be_dai_name;
+          if (aif_name == "ZERO")
+            aif_id = -1;
+          else
+            aif_id = be_dai_aif_id_map_.at(aif_name);
           ret =  agm_set_params_with_tag_to_acdb(agm_session_id, aif_id, ctl_elem_payload.value.tlv_data.tlv, ctl_elem_payload.value.tlv_data.tlv_size);
+          if (ret == -ENODEV) {
+            AUDIO_BASE_LOG(BASE_LOG_INFO, MODULE_VIO_AUD_DEV,
+                "SET_PARAM_TAG_ACDB: no tag data in ACDB (ret %d), treating as no-op", ret);
+            ret = 0;
+          }
           break;
       case EVENT:
           // Handle EVENT
@@ -469,7 +601,101 @@ uint32_t AGMAudioPlugin::DcWrite(const CtlElemPayload& ctl_elem_payload) {
           }
           break;
       case LOOPBACK:
-          // Handle LOOPBACK
+          {
+            string &tx_name = dai_name;
+            string &rx_name = enum_str;
+
+            /*
+             * When rx_name == "ZERO" this is a teardown notification; the real
+             * cleanup happens in StreamRelease so we no-op here.
+             */
+            if (rx_name == "ZERO") {
+                break;
+            }
+
+            if (fe_dai_session_id_map_.find(rx_name) == fe_dai_session_id_map_.end()) {
+                AUDIO_BASE_LOG(BASE_LOG_ERROR, MODULE_VIO_AUD_DEV, "LOOPBACK: RX %s not found", rx_name.c_str());
+                ret = IAUD_EINVAL;
+                break;
+            }
+
+            // Create LoopbackSession (LOOPBACK is sent only once per pair)
+            std::shared_ptr<LoopbackSession> lb_session = std::make_shared<LoopbackSession>();
+            lb_session->agm = &fe_dai_session_id_map_[tx_name];
+            lb_session->tx_name = tx_name;
+            lb_session->rx_name = rx_name;
+
+            aif_name = fe_dai_session_id_map_[tx_name].be_dai_name;
+            if (aif_name != "ZERO" && be_dai_aif_id_map_.find(aif_name) != be_dai_aif_id_map_.end())
+                lb_session->tx_aif_id = be_dai_aif_id_map_.at(aif_name);
+
+            aif_name = fe_dai_session_id_map_[rx_name].be_dai_name;
+            if (aif_name != "ZERO" && be_dai_aif_id_map_.find(aif_name) != be_dai_aif_id_map_.end())
+                lb_session->rx_aif_id = be_dai_aif_id_map_.at(aif_name);
+
+            loopback_sessions_[tx_name] = lb_session;
+            loopback_sessions_[rx_name] = lb_session;
+
+            if (lb_session->agm->agm_handle == 0) {
+                auto &tx_sm = fe_dai_session_id_map_[tx_name].sess_meta_cache;
+                auto &rx_sm = fe_dai_session_id_map_[rx_name].sess_meta_cache;
+                auto &tx_am = fe_dai_session_id_map_[tx_name].aif_meta_cache;
+                auto &rx_am = fe_dai_session_id_map_[rx_name].aif_meta_cache;
+
+                /* Merge TX session + RX session + TX AIF + RX AIF GKVs.
+                 * Tail (CKV + sg_props) taken only from TX session meta. */
+                uint32_t merged_sz = 0;
+                uint32_t *tmp;
+                uint32_t *merged = merge_metadata(
+                    tx_sm.empty() ? nullptr : (uint32_t *)tx_sm.data(), (uint32_t)tx_sm.size(),
+                    rx_sm.empty() ? nullptr : (uint32_t *)rx_sm.data(), (uint32_t)rx_sm.size(),
+                    &merged_sz);
+
+                tmp = merge_metadata(merged, merged_sz,
+                    tx_am.empty() ? nullptr : (uint32_t *)tx_am.data(), (uint32_t)tx_am.size(),
+                    &merged_sz);
+                free(merged);
+                merged = tmp;
+
+                tmp = merge_metadata(merged, merged_sz,
+                    rx_am.empty() ? nullptr : (uint32_t *)rx_am.data(), (uint32_t)rx_am.size(),
+                    &merged_sz);
+                free(merged);
+                merged = tmp;
+
+                if (merged) {
+                    ret = agm_session_set_metadata(lb_session->agm->agm_session_id, merged_sz, (uint8_t *)merged);
+                    AUDIO_BASE_LOG(BASE_LOG_INFO, MODULE_VIO_AUD_DEV, "LOOPBACK: agm_session_set_metadata ret=%d", ret);
+                    free(merged);
+                } else {
+                    AUDIO_BASE_LOG(BASE_LOG_ERROR, MODULE_VIO_AUD_DEV, "LOOPBACK: merge_metadata failed");
+                }
+
+                if (!tx_am.empty()) {
+                    ret = agm_session_aif_set_metadata(lb_session->agm->agm_session_id, lb_session->tx_aif_id, (uint32_t)tx_am.size(), (uint8_t *)tx_am.data());
+                    AUDIO_BASE_LOG(BASE_LOG_INFO, MODULE_VIO_AUD_DEV, "LOOPBACK: agm_session_aif_set_metadata TX AIF tx_aif_id=%d ret=%d", lb_session->tx_aif_id, ret);
+                }
+
+                if (!rx_am.empty()) {
+                    ret = agm_session_aif_set_metadata(lb_session->agm->agm_session_id, lb_session->rx_aif_id, (uint32_t)rx_am.size(), (uint8_t *)rx_am.data());
+                    AUDIO_BASE_LOG(BASE_LOG_INFO, MODULE_VIO_AUD_DEV, "LOOPBACK: agm_session_aif_set_metadata RX AIF rx_aif_id=%d ret=%d", lb_session->rx_aif_id, ret);
+                }
+
+                ret = agm_session_open(lb_session->agm->agm_session_id, AGM_SESSION_NO_HOST, &lb_session->agm->agm_handle);
+                if (ret != 0) {
+                    AUDIO_BASE_LOG(BASE_LOG_ERROR, MODULE_VIO_AUD_DEV, "LOOPBACK: agm_session_open failed ret=%d", ret);
+                    break;
+                }
+                AUDIO_BASE_LOG(BASE_LOG_INFO, MODULE_VIO_AUD_DEV, "LOOPBACK: session open OK tx=%s rx=%s handle=0x%lx",
+                    tx_name.c_str(), rx_name.c_str(), lb_session->agm->agm_handle);
+
+                ret = agm_session_aif_connect(lb_session->agm->agm_session_id, lb_session->tx_aif_id, true);
+                AUDIO_BASE_LOG(BASE_LOG_INFO, MODULE_VIO_AUD_DEV, "LOOPBACK: connect TX AIF id=%d ret=%d", lb_session->tx_aif_id, ret);
+
+                ret = agm_session_aif_connect(lb_session->agm->agm_session_id, lb_session->rx_aif_id, true);
+                AUDIO_BASE_LOG(BASE_LOG_INFO, MODULE_VIO_AUD_DEV, "LOOPBACK: connect RX AIF id=%d ret=%d", lb_session->rx_aif_id, ret);
+            }
+          }
           break;
       case ECHO_REFERENCE:
           {
@@ -493,7 +719,7 @@ uint32_t AGMAudioPlugin::DcWrite(const CtlElemPayload& ctl_elem_payload) {
           break;
     }
   }
-  else if (dai_name.substr(0,3) == "TDM"){
+  else if (dai_name.substr(0,3) == "TDM" || dai_name.substr(0,4) == "QAIF"){
     struct agm_media_config media_fmt;
     aif_id = be_dai_aif_id_map_[dai_name];
 
@@ -502,6 +728,7 @@ uint32_t AGMAudioPlugin::DcWrite(const CtlElemPayload& ctl_elem_payload) {
             AUDIO_BASE_LOG(BASE_LOG_INFO, MODULE_VIO_AUD_DEV, "DcWrite metadata mixer payload size %d", ctl_elem_payload.value.tlv_data.tlv_size);
             pMetadata = (uint32_t*) ctl_elem_payload.value.tlv_data.tlv;
             pMetadataSize = ctl_elem_payload.value.tlv_data.tlv_size;
+
             ret = agm_aif_set_metadata(aif_id, pMetadataSize, (uint8_t *)pMetadata);
             AUDIO_BASE_LOG(BASE_LOG_INFO, MODULE_VIO_AUD_DEV, "ret agm_aif_set_metadata %x", ret);
             break;
@@ -565,6 +792,11 @@ int AGMAudioPlugin::DcRead(CtlElemPayload& ctl_elem_payload) {
   }
 
   if (dai_name.substr(0,3) == "PCM"){
+    if (fe_dai_session_id_map_.find(dai_name) == fe_dai_session_id_map_.end()) {
+      AUDIO_BASE_LOG(BASE_LOG_ERROR, MODULE_VIO_AUD_DEV,
+          "DcRead: DAI %s not found in session map", dai_name.c_str());
+      return IAUD_EINVAL;
+    }
     uint32_t agm_session_id = fe_dai_session_id_map_[dai_name].agm_session_id;
     int32_t ret = 0;
     int ctl_val = fe_dai_session_id_map_[dai_name].ctl_val_;
@@ -618,9 +850,47 @@ int AGMAudioPlugin::DcRead(CtlElemPayload& ctl_elem_payload) {
         case GET_PARAM:
             // handle GET_PARAM
             break;
-        case GET_BUF_INFO:
-            // handle GET_BUF_INFO
+        case GET_BUF_INFO: {
+            /* Return the GVM-side fds and buffer sizes to GVM PAL.
+             * GVM PAL uses these fds to mmap() the shared buffers and
+             * establish the zero-copy data path to the DSP. */
+            if (ctl_elem_payload.value.tlv_data.tlv_size < sizeof(struct MmapBufInfo)) {
+                AUDIO_BASE_LOG(BASE_LOG_ERROR, MODULE_VIO_AUD_DEV,
+                    "GET_BUF_INFO: tlv too small %u < %zu",
+                    ctl_elem_payload.value.tlv_data.tlv_size, sizeof(struct MmapBufInfo));
+                rc = IAUD_EINVAL;
+                break;
+            }
+            struct MmapBufInfo *buf_info =
+                reinterpret_cast<struct MmapBufInfo *>(ctl_elem_payload.value.tlv_data.tlv);
+            if (buf_info == nullptr) {
+                AUDIO_BASE_LOG(BASE_LOG_ERROR, MODULE_VIO_AUD_DEV,
+                    "GET_BUF_INFO: null buf_info pointer");
+                rc = IAUD_EINVAL;
+                break;
+            }
+            if (fe_dai_session_id_map_[dai_name].push_pull_data_gvm_fd < 0 ||
+                fe_dai_session_id_map_[dai_name].push_pull_pos_gvm_fd < 0) {
+                AUDIO_BASE_LOG(BASE_LOG_ERROR, MODULE_VIO_AUD_DEV,
+                    "GET_BUF_INFO: fds not ready (StreamMmap not called), fe=%s",
+                    dai_name.c_str());
+                rc = IAUD_EINVAL;
+                break;
+            }
+            buf_info->data_buf_fd   = fe_dai_session_id_map_[dai_name].push_pull_data_gvm_fd;
+            buf_info->pos_buf_fd    = fe_dai_session_id_map_[dai_name].push_pull_pos_gvm_fd;
+            buf_info->data_buf_size = static_cast<int32_t>(
+                fe_dai_session_id_map_[dai_name].push_pull_data_size);
+            buf_info->pos_buf_size  = static_cast<int32_t>(
+                fe_dai_session_id_map_[dai_name].push_pull_pos_size);
+            AUDIO_BASE_LOG(BASE_LOG_INFO, MODULE_VIO_AUD_DEV,
+                "GET_BUF_INFO: fe=%s data_gvm_fd=%d pos_gvm_fd=%d "
+                "data_size=%d pos_size=%d",
+                dai_name.c_str(),
+                buf_info->data_buf_fd, buf_info->pos_buf_fd,
+                buf_info->data_buf_size, buf_info->pos_buf_size);
             break;
+        }
         case BUF_TIMESTAMP:
             // handle BUF_TIMESTAMP
             timestamp = (uint64_t *)ctl_elem_payload.value.bytes.data;
@@ -641,15 +911,25 @@ int AGMAudioPlugin::DcRead(CtlElemPayload& ctl_elem_payload) {
 
 uint32_t AGMAudioPlugin::StreamSetParam(std::string fe_dai_name, PCMSetParams& set_param_payload) {
     int ret = 0;
-    if (fe_dai_session_id_map_.find(fe_dai_name) != fe_dai_session_id_map_.end() &&
-        fe_dai_session_id_map_[fe_dai_name].agm_handle == 0){
-            ret = agm_session_open( fe_dai_session_id_map_[fe_dai_name].agm_session_id,
-                                    AGM_SESSION_DEFAULT,
-                                    &fe_dai_session_id_map_[fe_dai_name].agm_handle);
-              AUDIO_BASE_LOG(BASE_LOG_INFO, MODULE_VIO_AUD_DEV, "ret of agm_session_open %d", ret);
 
-            if (ret != 0)
-              return ret;
+    if (fe_dai_session_id_map_.find(fe_dai_name) == fe_dai_session_id_map_.end()){
+        AUDIO_BASE_LOG(BASE_LOG_ERROR, MODULE_VIO_AUD_DEV, "StreamSetParam invalid fe_dai_name");
+        return IAUD_EINVAL;
+    }
+
+    if (fe_dai_session_id_map_[fe_dai_name].session_config.sess_mode == AGM_SESSION_NO_HOST) {
+        AUDIO_BASE_LOG(BASE_LOG_INFO, MODULE_VIO_AUD_DEV, "skip StreamSetParam for NO_HOST session %s", fe_dai_name.c_str());
+        return IAUD_EOK;
+    }
+
+    if (fe_dai_session_id_map_[fe_dai_name].agm_handle == 0){
+        ret = agm_session_open(fe_dai_session_id_map_[fe_dai_name].agm_session_id,
+                               AGM_SESSION_DEFAULT,
+                               &fe_dai_session_id_map_[fe_dai_name].agm_handle);
+        AUDIO_BASE_LOG(BASE_LOG_INFO, MODULE_VIO_AUD_DEV, "ret of agm_session_open %d", ret);
+
+        if (ret != 0)
+            return ret;
     }
     /* session config is filled in from the the init class resources */
     fe_dai_session_id_map_[fe_dai_name].buffer_config.count = set_param_payload.buffer_bytes / set_param_payload.period_bytes;
@@ -659,6 +939,15 @@ uint32_t AGMAudioPlugin::StreamSetParam(std::string fe_dai_name, PCMSetParams& s
     fe_dai_session_id_map_[fe_dai_name].media_config.channels = set_param_payload.channels;
     fe_dai_session_id_map_[fe_dai_name].media_config.format = virtio2agm_fmt_map.at(set_param_payload.format);
     fe_dai_session_id_map_[fe_dai_name].media_config.data_format = AGM_DATA_FORMAT_FIXED_POINT; /* need to look into this*/
+
+    /* For mmap (aaudio) use case, switch to EXTERN_PUSH_PULL mode.
+     * The actual data/pos buf fds will be provided later via StreamMmap()
+     * and passed to GSL during configure_buffer_params() at PREPARE time. */
+    if (set_param_payload.is_mmap_noirq) {
+        fe_dai_session_id_map_[fe_dai_name].session_config.data_mode = AGM_DATA_EXTERN_PUSH_PULL;
+        AUDIO_BASE_LOG(BASE_LOG_INFO, MODULE_VIO_AUD_DEV,
+            "StreamSetParam: mmap mode detected, data_mode set to AGM_DATA_EXTERN_PUSH_PULL");
+    }
 
     ret = agm_session_set_config(  fe_dai_session_id_map_[fe_dai_name].agm_handle,
                                     &fe_dai_session_id_map_[fe_dai_name].session_config,
@@ -679,7 +968,26 @@ uint32_t AGMAudioPlugin::StreamPrepare(std::string fe_dai_name) {
 
     AUDIO_BASE_LOG(BASE_LOG_INFO, MODULE_VIO_AUD_DEV, "StreamPrepare called fe_dai_name=%s", fe_dai_name.c_str());
     int ret = 0;
-    ret = agm_session_register_cb(fe_dai_session_id_map_[fe_dai_name].agm_session_id,
+    uint32_t agm_session_id;
+    uint64_t agm_handle;
+
+    if (fe_dai_session_id_map_.find(fe_dai_name) == fe_dai_session_id_map_.end()){
+        AUDIO_BASE_LOG(BASE_LOG_ERROR, MODULE_VIO_AUD_DEV, "StreamPrepare invalid fe_dai_name");
+        return IAUD_EINVAL;
+    }
+
+    if (fe_dai_session_id_map_[fe_dai_name].session_config.sess_mode == AGM_SESSION_NO_HOST) {
+        AUDIO_BASE_LOG(BASE_LOG_INFO, MODULE_VIO_AUD_DEV, "skip StreamPrepare for NO_HOST session %s", fe_dai_name.c_str());
+        return IAUD_EOK;
+    }
+
+    {
+        std::lock_guard<std::mutex> stream_lock(fe_dai_session_id_map_[fe_dai_name].stream_mutex);
+        agm_session_id = fe_dai_session_id_map_[fe_dai_name].agm_session_id;
+        agm_handle     = fe_dai_session_id_map_[fe_dai_name].agm_handle;
+    }
+
+    ret = agm_session_register_cb(agm_session_id,
                                   eventCallback, AGM_EVENT_DATA_PATH, (void*)&(fe_dai_session_id_map_[fe_dai_name]));
 
     AUDIO_BASE_LOG(BASE_LOG_INFO, MODULE_VIO_AUD_DEV,"ret agm_session_register_cb Data %d", ret);
@@ -689,7 +997,7 @@ uint32_t AGMAudioPlugin::StreamPrepare(std::string fe_dai_name) {
         "AP::StreamPrepare: error: agm_session_register_cb ");
       return IAUD_EINVAL;
     }
-    ret = agm_session_register_cb(fe_dai_session_id_map_[fe_dai_name].agm_session_id,
+    ret = agm_session_register_cb(agm_session_id,
                                   eventCallback, AGM_EVENT_MODULE, (void*)&(fe_dai_session_id_map_[fe_dai_name]));
 
     AUDIO_BASE_LOG(BASE_LOG_INFO, MODULE_VIO_AUD_DEV,"ret agm_session_register_cb Event %d", ret);
@@ -700,7 +1008,33 @@ uint32_t AGMAudioPlugin::StreamPrepare(std::string fe_dai_name) {
       return IAUD_EINVAL;
     }
 
-    ret = agm_session_prepare(fe_dai_session_id_map_[fe_dai_name].agm_handle);
+    /* For EXTERN_PUSH_PULL (MMAP/AAudio) mode, pass shared buffer fds to AGM before prepare */
+    if (fe_dai_session_id_map_[fe_dai_name].session_config.data_mode == AGM_DATA_EXTERN_PUSH_PULL) {
+        if (fe_dai_session_id_map_[fe_dai_name].push_pull_data_pvm_fd < 0 ||
+            fe_dai_session_id_map_[fe_dai_name].push_pull_pos_pvm_fd < 0) {
+            AUDIO_BASE_LOG(BASE_LOG_ERROR, MODULE_VIO_AUD_DEV,
+                "StreamPrepare: EXTERN_PUSH_PULL but pvm fds not ready (StreamMmap not called)");
+            return IAUD_EINVAL;
+        }
+        struct agm_buf_info buf_info = {};
+        buf_info.data_buf_fd   = fe_dai_session_id_map_[fe_dai_name].push_pull_data_pvm_fd;
+        buf_info.data_buf_size = fe_dai_session_id_map_[fe_dai_name].push_pull_data_size;
+        buf_info.pos_buf_fd    = fe_dai_session_id_map_[fe_dai_name].push_pull_pos_pvm_fd;
+        buf_info.pos_buf_size  = fe_dai_session_id_map_[fe_dai_name].push_pull_pos_size;
+        ret = agm_session_set_buf_info(fe_dai_session_id_map_[fe_dai_name].agm_session_id,
+                                       &buf_info, DATA_BUF | POS_BUF);
+        AUDIO_BASE_LOG(BASE_LOG_INFO, MODULE_VIO_AUD_DEV,
+            "StreamPrepare: agm_session_set_buf_info data_fd=%d pos_fd=%d ret=%d",
+            buf_info.data_buf_fd, buf_info.pos_buf_fd, ret);
+        if (ret) {
+            AUDIO_BASE_LOG(BASE_LOG_ERROR, MODULE_VIO_AUD_DEV,
+                "StreamPrepare: agm_session_set_buf_info failed ret=%d", ret);
+            return IAUD_EINVAL;
+        }
+    }
+
+
+    ret = agm_session_prepare(agm_handle);
     if (ret)
         AUDIO_BASE_LOG(BASE_LOG_ERROR, MODULE_VIO_AUD_DEV,"agm_session_prepare failed ret %d", ret);
     else
@@ -712,25 +1046,58 @@ uint32_t AGMAudioPlugin::StreamPrepare(std::string fe_dai_name) {
 uint32_t AGMAudioPlugin::StreamRelease(std::string fe_dai_name) {
     int ret = 0;
 
-    /* Unregister callbacks to avoid duplicate entries on next StreamPrepare */
-    agm_session_register_cb(fe_dai_session_id_map_[fe_dai_name].agm_session_id,
-                            NULL, AGM_EVENT_DATA_PATH, (void*)&(fe_dai_session_id_map_[fe_dai_name]));
-    agm_session_register_cb(fe_dai_session_id_map_[fe_dai_name].agm_session_id,
-                            NULL, AGM_EVENT_MODULE, (void*)&(fe_dai_session_id_map_[fe_dai_name]));
+    if (fe_dai_session_id_map_.find(fe_dai_name) == fe_dai_session_id_map_.end()) {
+        AUDIO_BASE_LOG(BASE_LOG_ERROR, MODULE_VIO_AUD_DEV, "StreamRelease: invalid fe_dai_name");
+        return IAUD_EINVAL;
+    }
+    AGMsession &sess = fe_dai_session_id_map_[fe_dai_name];
+    std::lock_guard<std::mutex> stream_lock(sess.stream_mutex);
 
-    ret = agm_session_close(fe_dai_session_id_map_[fe_dai_name].agm_handle);
-    fe_dai_session_id_map_[fe_dai_name].agm_handle = 0;
-    fe_dai_session_id_map_[fe_dai_name].ctl_val_ = 0;
-    fe_dai_session_id_map_[fe_dai_name].timestamp = 0;
-    fe_dai_session_id_map_[fe_dai_name].be_dai_name = "ZERO";
-    fe_dai_session_id_map_[fe_dai_name].push_pull_data_gvm_fd = -1;
-    fe_dai_session_id_map_[fe_dai_name].push_pull_pos_gvm_fd = -1;
-    memset(&fe_dai_session_id_map_[fe_dai_name].media_config, 0, sizeof(agm_media_config));
-    memset(&fe_dai_session_id_map_[fe_dai_name].buffer_config, 0, sizeof(agm_buffer_config));
+    if (sess.session_config.sess_mode == AGM_SESSION_NO_HOST) {
+        auto iter = loopback_sessions_.find(fe_dai_name);
+        if (iter != loopback_sessions_.end()) {
+            if (fe_dai_name == iter->second->tx_name)
+                iter->second->tx_released = true;
+            else if (fe_dai_name == iter->second->rx_name)
+                iter->second->rx_released = true;
+
+            if (iter->second->tx_released && iter->second->rx_released) {
+                auto lb = iter->second;
+                loopback_sessions_.erase(lb->tx_name);
+                loopback_sessions_.erase(lb->rx_name);
+                ret = agm_session_close(lb->agm->agm_handle);
+                lb->agm->agm_handle = 0;
+                AUDIO_BASE_LOG(BASE_LOG_INFO, MODULE_VIO_AUD_DEV,
+                    "StreamRelease: both tx rx released");
+            }
+        }
+    } else {
+        /* Unregister callbacks to avoid duplicate entries on next StreamPrepare */
+        agm_session_register_cb(sess.agm_session_id,
+                                NULL, AGM_EVENT_DATA_PATH, (void*)&sess);
+        agm_session_register_cb(sess.agm_session_id,
+                                NULL, AGM_EVENT_MODULE, (void*)&sess);
+        ret = agm_session_close(sess.agm_handle);
+        sess.agm_handle = 0;
+    }
+    sess.ctl_val_ = 0;
+    sess.timestamp = 0;
+    sess.be_dai_name = "ZERO";
+    sess.push_pull_data_gvm_fd = -1;
+    sess.push_pull_pos_gvm_fd = -1;
+    sess.push_pull_data_pvm_fd = -1;
+    sess.push_pull_pos_pvm_fd  = -1;
+    sess.push_pull_data_size   = 0;
+    sess.push_pull_pos_size    = 0;
+    sess.session_config.data_mode = AGM_DATA_EXTERN_MEM;
+    memset(&sess.media_config, 0, sizeof(agm_media_config));
+    memset(&sess.buffer_config, 0, sizeof(agm_buffer_config));
     /*GL unmap dma area*/
-    munmap(fe_dai_session_id_map_[fe_dai_name].vaddr_dma_area, fe_dai_session_id_map_[fe_dai_name].dma_area_size);
-    fe_dai_session_id_map_[fe_dai_name].vaddr_dma_area = nullptr;
-    fe_dai_session_id_map_[fe_dai_name].dma_area_size = 0;
+    munmap(sess.vaddr_dma_area, sess.dma_area_size);
+    sess.vaddr_dma_area = nullptr;
+    sess.dma_area_size = 0;
+    sess.sess_meta_cache.clear();
+    sess.aif_meta_cache.clear();
     AUDIO_BASE_LOG(BASE_LOG_INFO, MODULE_VIO_AUD_DEV,"StreamRelease ");
     return ret;
 }
@@ -738,7 +1105,53 @@ uint32_t AGMAudioPlugin::StreamRelease(std::string fe_dai_name) {
 
 uint32_t AGMAudioPlugin::StreamStart(std::string fe_dai_name) {
     int32_t ret = 0;
-    ret =  agm_session_start(fe_dai_session_id_map_[fe_dai_name].agm_handle);
+    uint64_t agm_handle;
+
+    if (fe_dai_session_id_map_.find(fe_dai_name) == fe_dai_session_id_map_.end()){
+        AUDIO_BASE_LOG(BASE_LOG_ERROR, MODULE_VIO_AUD_DEV, "StreamStart: invalid fe_dai_name");
+        return IAUD_EINVAL;
+    }
+
+    {
+        std::lock_guard<std::mutex> stream_lock(fe_dai_session_id_map_[fe_dai_name].stream_mutex);
+        agm_handle = fe_dai_session_id_map_[fe_dai_name].agm_handle;
+
+        if (fe_dai_session_id_map_[fe_dai_name].session_config.sess_mode == AGM_SESSION_NO_HOST) {
+            auto iter = loopback_sessions_.find(fe_dai_name);
+            if (iter == loopback_sessions_.end()) {
+                AUDIO_BASE_LOG(BASE_LOG_ERROR, MODULE_VIO_AUD_DEV,
+                    "StreamStart: NO_HOST %s has no loopback session found", fe_dai_name.c_str());
+                return IAUD_EINVAL;
+            }
+
+            if (fe_dai_name == iter->second->tx_name) {
+                iter->second->tx_started = true;
+            } else if (fe_dai_name == iter->second->rx_name) {
+                iter->second->rx_started = true;
+            }
+
+            if (!iter->second->tx_started || !iter->second->rx_started) {
+                AUDIO_BASE_LOG(BASE_LOG_INFO, MODULE_VIO_AUD_DEV,
+                    "StreamStart: NO_HOST %s is first, waiting for partner", fe_dai_name.c_str());
+                return IAUD_EOK;
+            } else {
+                AUDIO_BASE_LOG(BASE_LOG_INFO, MODULE_VIO_AUD_DEV,
+                    "StreamStart: NO_HOST both sides ready (%s + %s), starting DSP",
+                    iter->second->tx_name.c_str(), iter->second->rx_name.c_str());
+            }
+            agm_handle = iter->second->agm->agm_handle;
+        }
+    }
+
+    if (fe_dai_session_id_map_[fe_dai_name].session_config.sess_mode == AGM_SESSION_NO_HOST) {
+        ret = agm_session_prepare(agm_handle);
+        AUDIO_BASE_LOG(BASE_LOG_INFO, MODULE_VIO_AUD_DEV,
+            "StreamStart: NO_HOST agm_session_prepare handle=0x%lx ret=%d", agm_handle, ret);
+        if (ret)
+            return ret;
+    }
+
+    ret = agm_session_start(agm_handle);
 
     AUDIO_BASE_LOG(BASE_LOG_INFO, MODULE_VIO_AUD_DEV,"ret agm_session_start %d", ret);
 
@@ -747,7 +1160,44 @@ uint32_t AGMAudioPlugin::StreamStart(std::string fe_dai_name) {
 
 uint32_t AGMAudioPlugin::StreamStop(std::string fe_dai_name) {
     AUDIO_BASE_LOG(BASE_LOG_INFO, MODULE_VIO_AUD_DEV,"StreamStop ");
-    return agm_session_stop(fe_dai_session_id_map_[fe_dai_name].agm_handle);
+    uint64_t agm_handle;
+
+    if (fe_dai_session_id_map_.find(fe_dai_name) == fe_dai_session_id_map_.end()){
+        AUDIO_BASE_LOG(BASE_LOG_ERROR, MODULE_VIO_AUD_DEV, "StreamStop: invalid fe_dai_name");
+        return IAUD_EINVAL;
+    }
+
+    {
+        std::lock_guard<std::mutex> stream_lock(fe_dai_session_id_map_[fe_dai_name].stream_mutex);
+        agm_handle = fe_dai_session_id_map_[fe_dai_name].agm_handle;
+
+        if (fe_dai_session_id_map_[fe_dai_name].session_config.sess_mode == AGM_SESSION_NO_HOST) {
+            auto iter = loopback_sessions_.find(fe_dai_name);
+            if (iter == loopback_sessions_.end()) {
+                AUDIO_BASE_LOG(BASE_LOG_ERROR, MODULE_VIO_AUD_DEV,
+                    "StreamStop: NO_HOST %s has no loopback session found", fe_dai_name.c_str());
+                return IAUD_EINVAL;
+            }
+
+            if (fe_dai_name == iter->second->tx_name) {
+                iter->second->tx_started = false;
+            } else if (fe_dai_name == iter->second->rx_name) {
+                iter->second->rx_started = false;
+            }
+
+            if (iter->second->tx_started || iter->second->rx_started) {
+                AUDIO_BASE_LOG(BASE_LOG_INFO, MODULE_VIO_AUD_DEV,
+                    "StreamStop: NO_HOST %s is first to stop, waiting for partner", fe_dai_name.c_str());
+                return IAUD_EOK;
+            } else {
+                AUDIO_BASE_LOG(BASE_LOG_INFO, MODULE_VIO_AUD_DEV,
+                    "StreamStop: NO_HOST both sides stopped (%s + %s), stopping DSP",
+                    iter->second->tx_name.c_str(), iter->second->rx_name.c_str());
+            }
+            agm_handle = iter->second->agm->agm_handle;
+        }
+    }
+    return agm_session_stop(agm_handle);
 }
 
 uint32_t AGMAudioPlugin::StreamWriteDone(struct virtio_snd_pcm_buf_msg& msg) {
@@ -764,25 +1214,33 @@ uint32_t AGMAudioPlugin::StreamWrite(struct virtio_snd_pcm_buf_msg& msg) {
 
     AUDIO_BASE_LOG(BASE_LOG_DEBUG, MODULE_VIO_AUD_DEV,"StreamWrite enter");
 
-    if (fe_dai_session_id_map_.find(msg.fe_dai_name) == fe_dai_session_id_map_.end() ||
-        !fe_dai_session_id_map_.at(msg.fe_dai_name).agm_handle) {
+    if (fe_dai_session_id_map_.find(msg.fe_dai_name) == fe_dai_session_id_map_.end()) {
         AUDIO_BASE_LOG(BASE_LOG_ERROR, MODULE_VIO_AUD_DEV,
                 "StreamWrite invalid args for msg.fe_dai_name: %s",
                 msg.fe_dai_name.c_str());
         return IAUD_EINVAL;
     }
 
-    if (fe_dai_session_id_map_.at(msg.fe_dai_name).vaddr_dma_area == nullptr){
-      fe_dai_session_id_map_.at(msg.fe_dai_name).vaddr_dma_area = mmap(NULL, msg.dma_bytes, PROT_READ | PROT_WRITE, MAP_SHARED, msg.buff_fd, 0);
-      fe_dai_session_id_map_.at(msg.fe_dai_name).dma_area_size = msg.dma_bytes;
-      if (fe_dai_session_id_map_.at(msg.fe_dai_name).vaddr_dma_area == (void*)-1)
-      {
-          AUDIO_BASE_LOG(BASE_LOG_ERROR, MODULE_VIO_AUD_DEV, "AGMAudioPlugin - mmap failed with err\n");
-      } else {
-        AUDIO_BASE_LOG(BASE_LOG_DEBUG, MODULE_VIO_AUD_DEV, "AGMAudioPlugin - mmap succeeded %x\n",fe_dai_session_id_map_.at(msg.fe_dai_name).vaddr_dma_area);
-      }
+    AGMsession &sess = fe_dai_session_id_map_.at(msg.fe_dai_name);
+    {
+        std::lock_guard<std::mutex> stream_lock(sess.stream_mutex);
+        agm_handle = sess.agm_handle;
+        if (!agm_handle) {
+            AUDIO_BASE_LOG(BASE_LOG_ERROR, MODULE_VIO_AUD_DEV,
+                    "StreamWrite invalid args for msg.fe_dai_name: %s",
+                    msg.fe_dai_name.c_str());
+            return IAUD_EINVAL;
+        }
+        if (sess.vaddr_dma_area == nullptr) {
+            sess.vaddr_dma_area = mmap(NULL, msg.dma_bytes, PROT_READ | PROT_WRITE, MAP_SHARED, msg.buff_fd, 0);
+            sess.dma_area_size = msg.dma_bytes;
+            if (sess.vaddr_dma_area == (void*)-1) {
+                AUDIO_BASE_LOG(BASE_LOG_ERROR, MODULE_VIO_AUD_DEV, "AGMAudioPlugin - mmap failed with err\n");
+            } else {
+                AUDIO_BASE_LOG(BASE_LOG_DEBUG, MODULE_VIO_AUD_DEV, "AGMAudioPlugin - mmap succeeded %x\n", sess.vaddr_dma_area);
+            }
+        }
     }
-    agm_handle = fe_dai_session_id_map_.at(msg.fe_dai_name).agm_handle;
     buff_info.timestamp = 0;
     buff_info.flags = 0;
     buff_info.size = msg.size;
@@ -813,15 +1271,24 @@ uint32_t AGMAudioPlugin::StreamRead(struct virtio_snd_pcm_buf_msg& msg) {
 
     memset(&buff_info, 0, sizeof(agm_buff));
 
-    if (fe_dai_session_id_map_.find(msg.fe_dai_name) == fe_dai_session_id_map_.end() ||
-        !fe_dai_session_id_map_.at(msg.fe_dai_name).agm_handle) {
+    if (fe_dai_session_id_map_.find(msg.fe_dai_name) == fe_dai_session_id_map_.end()) {
         AUDIO_BASE_LOG(BASE_LOG_ERROR, MODULE_VIO_AUD_DEV,
-                "StreamWrite invalid args for msg.fe_dai_name: %s",
+                "StreamRead invalid args for msg.fe_dai_name: %s",
                 msg.fe_dai_name.c_str());
         return IAUD_EINVAL;
     }
 
-    agm_handle = fe_dai_session_id_map_.at(msg.fe_dai_name).agm_handle;
+    AGMsession &sess = fe_dai_session_id_map_.at(msg.fe_dai_name);
+    {
+        std::lock_guard<std::mutex> stream_lock(sess.stream_mutex);
+        agm_handle = sess.agm_handle;
+        if (!agm_handle) {
+            AUDIO_BASE_LOG(BASE_LOG_ERROR, MODULE_VIO_AUD_DEV,
+                    "StreamRead invalid args for msg.fe_dai_name: %s",
+                    msg.fe_dai_name.c_str());
+            return IAUD_EINVAL;
+        }
+    }
     buff_info.timestamp = 0;
     buff_info.flags = 0;
     buff_info.size = msg.size;
@@ -841,12 +1308,84 @@ uint32_t AGMAudioPlugin::StreamRead(struct virtio_snd_pcm_buf_msg& msg) {
 }
 
 uint32_t AGMAudioPlugin::StreamMmap(std::string fe_dai_name, PCMMmapParams& msg) {
-    std::cout << "StreamMmap not supported in AGM\n";
-    return 0;
+    if (fe_dai_session_id_map_.find(fe_dai_name) == fe_dai_session_id_map_.end()) {
+        AUDIO_BASE_LOG(BASE_LOG_ERROR, MODULE_VIO_AUD_DEV,
+            "StreamMmap: unknown fe_dai_name %s", fe_dai_name.c_str());
+        return IAUD_EINVAL;
+    }
+
+    AGMsession &sess = fe_dai_session_id_map_[fe_dai_name];
+
+    /* Store PVM-side fds — these will be passed to AGM/GSL at configure_buffer_params() time */
+    sess.push_pull_data_pvm_fd = static_cast<int>(msg.data_fd);
+    sess.push_pull_pos_pvm_fd  = static_cast<int>(msg.pos_fd);
+    /* Store GVM-side fds — returned to GVM PAL via DcRead(getBufInfo) */
+    sess.push_pull_data_gvm_fd = static_cast<int>(msg.data_gvm_fd);
+    sess.push_pull_pos_gvm_fd  = static_cast<int>(msg.pos_gvm_fd);
+    /* Store sizes — also returned via getBufInfo */
+    sess.push_pull_data_size   = msg.data_size;
+    sess.push_pull_pos_size    = msg.pos_size;
+
+    AUDIO_BASE_LOG(BASE_LOG_INFO, MODULE_VIO_AUD_DEV,
+        "StreamMmap: fe=%s data_pvm_fd=%d pos_pvm_fd=%d data_gvm_fd=%d pos_gvm_fd=%d "
+        "data_size=%u pos_size=%u",
+        fe_dai_name.c_str(),
+        sess.push_pull_data_pvm_fd, sess.push_pull_pos_pvm_fd,
+        sess.push_pull_data_gvm_fd, sess.push_pull_pos_gvm_fd,
+        sess.push_pull_data_size,   sess.push_pull_pos_size);
+
+    return IAUD_EOK;
+}
+
+void AGMAudioPlugin::ClearSessionInfo()
+{
+    AUDIO_BASE_LOG(BASE_LOG_INFO, MODULE_VIO_AUD_DEV,
+                   "ClearSessionInfo: closing all open AGM sessions due to SSR");
+
+    for (auto &iter : fe_dai_session_id_map_) {
+        AGMsession &sess = iter.second;
+        std::lock_guard<std::mutex> stream_lock(sess.stream_mutex);
+
+        if (sess.agm_handle == 0)
+            continue;
+        agm_session_register_cb(sess.agm_session_id, NULL, AGM_EVENT_DATA_PATH, (void*)&sess);
+        agm_session_register_cb(sess.agm_session_id, NULL, AGM_EVENT_MODULE, (void*)&sess);
+
+        if (sess.vaddr_dma_area != nullptr) {
+            munmap(sess.vaddr_dma_area, sess.dma_area_size);
+            sess.vaddr_dma_area = nullptr;
+            sess.dma_area_size = 0;
+        }
+
+        int ret = agm_session_close(sess.agm_handle);
+        if (ret)
+            AUDIO_BASE_LOG(BASE_LOG_ERROR, MODULE_VIO_AUD_DEV,
+                           "ClearSessionInfo: agm_session_close failed ret=%d for %s",
+                           ret, iter.first.c_str());
+
+        sess.agm_handle = 0;
+        sess.ctl_val_ = 0;
+        sess.timestamp = 0;
+        sess.be_dai_name = "ZERO";
+        sess.push_pull_data_gvm_fd = -1;
+        sess.push_pull_pos_gvm_fd = -1;
+        memset(&sess.media_config, 0, sizeof(agm_media_config));
+        memset(&sess.buffer_config, 0, sizeof(agm_buffer_config));
+        sess.sess_meta_cache.clear();
+        sess.aif_meta_cache.clear();
+    }
 }
 
 int AGMAudioPlugin::RegisterSSREvent(std::function<void(enum SSRState)> ssr_cb_func) {
-    std::cout << "RegisterSSREvent not supported in AGM\n";
+    int rc = agm_register_ssr_cb(SSRCallbackFunc, (void *)this);
+    if (rc != 0) {
+        AUDIO_BASE_LOG(BASE_LOG_ERROR, MODULE_VIO_AUD_DEV,
+                       "RegisterSSREvent: agm_register_ssr_cb failed rc=%d", rc);
+        return rc;
+    }
+    adm_ssr_cb = ssr_cb_func;
+    AUDIO_BASE_LOG(BASE_LOG_INFO, MODULE_VIO_AUD_DEV,
+                   "RegisterSSREvent: SSR callback registered successfully");
     return 0;
 }
 
